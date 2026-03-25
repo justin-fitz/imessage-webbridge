@@ -73,6 +73,7 @@ def get_recent_chats(db_path: str, limit: int = 50) -> list[dict]:
                 JOIN chat_message_join cmj2 ON m2.ROWID = cmj2.message_id
                 WHERE cmj2.chat_id = c.ROWID
                   AND m2.item_type = 0 AND m2.associated_message_type = 0
+                  AND NOT (m2.text IS NULL AND m2.cache_has_attachments = 0)
                 ORDER BY m2.ROWID DESC LIMIT 1) as last_text
         FROM chat c
         JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
@@ -108,6 +109,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, limit: int = 100) -> l
         WHERE c.chat_identifier = ?
           AND m.item_type = 0
           AND m.associated_message_type = 0
+          AND NOT (m.text IS NULL AND m.cache_has_attachments = 0)
         ORDER BY m.ROWID DESC
         LIMIT ?
     """, (chat_identifier, limit)).fetchall()
@@ -144,7 +146,7 @@ def create_app(bridge: Bridge) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         chats = get_recent_chats(bridge.config.imessage.db_path)
-        return templates.TemplateResponse("chat.html", {"request": request, "chats": chats})
+        return templates.TemplateResponse(request, "chat.html", {"chats": chats})
 
     @app.get("/api/chats")
     async def api_chats():
