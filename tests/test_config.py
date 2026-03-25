@@ -31,6 +31,10 @@ bridge:
     - "+15551234567"
   state_db: "db/bridge.db"
   temp_dir: "tmp/"
+
+web:
+  host: "0.0.0.0"
+  port: 9090
 """)
     cfg = load_config(path)
     assert cfg.discord.bot_token == "test-token-123"
@@ -39,6 +43,8 @@ bridge:
     assert cfg.imessage.poll_interval_seconds == 5
     assert "~" not in cfg.imessage.db_path  # expanded
     assert cfg.bridge.allowed_chats == ["+15551234567"]
+    assert cfg.web.host == "0.0.0.0"
+    assert cfg.web.port == 9090
 
 
 def test_load_minimal_config(config_file):
@@ -52,6 +58,8 @@ discord:
     assert cfg.discord.category_name == "iMessage"  # default
     assert cfg.imessage.poll_interval_seconds == 2  # default
     assert cfg.bridge.allowed_chats == []  # default
+    assert cfg.web.host == "127.0.0.1"  # default
+    assert cfg.web.port == 8080  # default
 
 
 def test_guild_id_coerced_to_int(config_file):
@@ -75,3 +83,23 @@ imessage:
 """)
     cfg = load_config(path)
     assert cfg.imessage.db_path == os.path.expanduser("~/some/path.db")
+
+
+def test_discord_optional(config_file):
+    path = config_file("""
+imessage:
+  db_path: "~/Library/Messages/chat.db"
+""")
+    cfg = load_config(path)
+    assert cfg.discord is None
+    assert cfg.imessage.db_path == os.path.expanduser("~/Library/Messages/chat.db")
+
+
+def test_discord_none_when_no_token(config_file):
+    path = config_file("""
+discord:
+  bot_token: ""
+  guild_id: 123
+""")
+    cfg = load_config(path)
+    assert cfg.discord is None

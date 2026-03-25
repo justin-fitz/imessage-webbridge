@@ -12,6 +12,12 @@ class DiscordConfig:
 
 
 @dataclass
+class WebConfig:
+    host: str = "127.0.0.1"
+    port: int = 8080
+
+
+@dataclass
 class IMessageConfig:
     db_path: str = "~/Library/Messages/chat.db"
     attachments_path: str = "~/Library/Messages/Attachments/"
@@ -27,20 +33,23 @@ class BridgeConfig:
 
 @dataclass
 class Config:
-    discord: DiscordConfig
+    discord: DiscordConfig | None
     imessage: IMessageConfig
     bridge: BridgeConfig
+    web: WebConfig
 
 
 def load_config(path: str) -> Config:
     with open(path) as f:
         raw = yaml.safe_load(f)
 
-    discord_cfg = DiscordConfig(
-        bot_token=raw["discord"]["bot_token"],
-        guild_id=int(raw["discord"]["guild_id"]),
-        category_name=raw["discord"].get("category_name", "iMessage"),
-    )
+    discord_cfg = None
+    if "discord" in raw and raw["discord"].get("bot_token"):
+        discord_cfg = DiscordConfig(
+            bot_token=raw["discord"]["bot_token"],
+            guild_id=int(raw["discord"]["guild_id"]),
+            category_name=raw["discord"].get("category_name", "iMessage"),
+        )
 
     im = raw.get("imessage", {})
     imessage_cfg = IMessageConfig(
@@ -56,4 +65,10 @@ def load_config(path: str) -> Config:
         temp_dir=br.get("temp_dir", "tmp/"),
     )
 
-    return Config(discord=discord_cfg, imessage=imessage_cfg, bridge=bridge_cfg)
+    w = raw.get("web", {})
+    web_cfg = WebConfig(
+        host=w.get("host", "127.0.0.1"),
+        port=w.get("port", 8080),
+    )
+
+    return Config(discord=discord_cfg, imessage=imessage_cfg, bridge=bridge_cfg, web=web_cfg)

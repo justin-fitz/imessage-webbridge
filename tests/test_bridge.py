@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bridge import Bridge
-from config import BridgeConfig, Config, DiscordConfig, IMessageConfig
+from config import BridgeConfig, Config, DiscordConfig, IMessageConfig, WebConfig
 from models import BridgeAttachment, BridgeMessage
 
 
@@ -20,6 +20,7 @@ def _make_config(tmp_path):
             state_db=str(tmp_path / "bridge.db"),
             temp_dir=str(tmp_path / "tmp"),
         ),
+        web=WebConfig(),
     )
 
 

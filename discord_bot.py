@@ -53,9 +53,22 @@ class DiscordBridge(discord.Client):
             return
         if not self.category or message.channel.category_id != self.category.id:
             return
-        await self.bridge.handle_discord_message(message)
 
-    async def forward_to_discord(self, msg: BridgeMessage):
+        chat_id = self.bridge.channel_map.get_chat_identifier(message.channel.id)
+        chat_style = self.bridge.channel_map.get_chat_style(message.channel.id)
+        if not chat_id:
+            return
+
+        for att in message.attachments:
+            os.makedirs(self.bridge.config.bridge.temp_dir, exist_ok=True)
+            file_path = os.path.join(self.bridge.config.bridge.temp_dir, att.filename)
+            await att.save(file_path)
+            self.bridge.send_to_imessage(chat_id, chat_style or 45, file_path=os.path.abspath(file_path))
+
+        if message.content:
+            self.bridge.send_to_imessage(chat_id, chat_style or 45, text=message.content)
+
+    async def forward_to_output(self, msg: BridgeMessage):
         channel = await self._get_or_create_channel(msg)
         if not channel:
             return
