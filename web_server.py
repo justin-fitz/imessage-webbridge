@@ -100,7 +100,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, limit: int = 100) -> l
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
-        SELECT m.text, m.is_from_me, m.date, h.id as sender_id
+        SELECT m.text, m.is_from_me, m.date, m.attributedBody, h.id as sender_id
         FROM message m
         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
         JOIN chat c ON cmj.chat_id = c.ROWID
@@ -113,15 +113,22 @@ def get_chat_messages(db_path: str, chat_identifier: str, limit: int = 100) -> l
     """, (chat_identifier, limit)).fetchall()
     conn.close()
 
+    from imessage_reader import IMessageReader
+
     messages = []
     for row in reversed(rows):
+        text = row["text"]
+        if text is None and row["attributedBody"]:
+            text = IMessageReader._extract_attributed_text(row["attributedBody"])
         date = row["date"]
         if date and date != 0:
             ts = datetime.fromtimestamp(date / 1_000_000_000 + APPLE_EPOCH_OFFSET, tz=timezone.utc).isoformat()
         else:
             ts = ""
+        if text is None and row["attributedBody"] is None:
+            continue  # skip delivery receipts
         messages.append({
-            "text": row["text"],
+            "text": text,
             "is_from_me": bool(row["is_from_me"]),
             "sender_id": row["sender_id"] or "me",
             "timestamp": ts,

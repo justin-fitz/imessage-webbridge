@@ -110,7 +110,8 @@ def _create_test_chatdb(path):
         CREATE TABLE message (
             ROWID INTEGER PRIMARY KEY, text TEXT, is_from_me INTEGER DEFAULT 0,
             date INTEGER, handle_id INTEGER, cache_has_attachments INTEGER DEFAULT 0,
-            item_type INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0
+            item_type INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
+            attributedBody BLOB
         );
         CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
 

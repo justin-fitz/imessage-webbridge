@@ -9,7 +9,7 @@ APPLE_EPOCH_OFFSET = 978307200
 
 MESSAGES_QUERY = """
 SELECT m.ROWID, m.text, m.is_from_me, m.date, m.handle_id,
-       m.cache_has_attachments,
+       m.cache_has_attachments, m.attributedBody,
        h.id AS sender_id,
        c.ROWID AS chat_rowid, c.chat_identifier, c.display_name, c.style
 FROM message m
@@ -56,9 +56,13 @@ class IMessageReader:
             if row["cache_has_attachments"]:
                 attachments = self._get_attachments(row["ROWID"])
 
+            text = row["text"]
+            if text is None and row["attributedBody"]:
+                text = self._extract_attributed_text(row["attributedBody"])
+
             msg = BridgeMessage(
                 rowid=row["ROWID"],
-                text=row["text"],
+                text=text,
                 is_from_me=bool(row["is_from_me"]),
                 sender_id=row["sender_id"] or "me",
                 chat_identifier=row["chat_identifier"],
@@ -91,6 +95,31 @@ class IMessageReader:
                 )
             )
         return attachments
+
+    @staticmethod
+    def _extract_attributed_text(ab: bytes) -> str | None:
+        """Extract plain text from NSAttributedString typedstream blob."""
+        parts = ab.split(b"NSString")
+        if len(parts) < 2:
+            return None
+        after = parts[1]
+        idx = after.find(b"\x01+")
+        if idx == -1:
+            return None
+        idx += 2
+        length_byte = after[idx]
+        idx += 1
+        if length_byte & 0x80:
+            num_length_bytes = length_byte & 0x7F
+            length = int.from_bytes(after[idx : idx + num_length_bytes], "big")
+            idx += num_length_bytes
+        else:
+            length = length_byte
+        try:
+            text = after[idx : idx + length].decode("utf-8")
+            return text.lstrip("\x00") or None
+        except (UnicodeDecodeError, IndexError):
+            return None
 
     @staticmethod
     def _convert_date(apple_ns: int) -> datetime:
