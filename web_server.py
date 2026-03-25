@@ -144,7 +144,7 @@ def create_app(bridge: Bridge) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         chats = get_recent_chats(bridge.config.imessage.db_path)
-        return templates.TemplateResponse("chat.html", {"request": request, "chats": chats})
+        return templates.TemplateResponse(request, "chat.html", {"chats": chats})
 
     @app.get("/api/chats")
     async def api_chats():
