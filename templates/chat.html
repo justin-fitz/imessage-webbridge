@@ -48,6 +48,12 @@
   .chat-item:hover { background: #2a2a2a; }
   .chat-item.active { background: #333; }
 
+  .chat-item-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .chat-item-name {
     font-weight: 500;
     font-size: 14px;
@@ -55,7 +61,28 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    flex: 1;
   }
+
+  .chat-item.unread .chat-item-name { font-weight: 700; }
+  .chat-item.unread .chat-item-preview { color: #e0e0e0; }
+
+  .unread-badge {
+    display: none;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 10px;
+    background: #0b84fe;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 20px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .chat-item.unread .unread-badge { display: inline-block; }
 
   .chat-item-preview {
     font-size: 12px;
@@ -126,6 +153,15 @@
   }
 
   .msg.from-me .msg-time { color: rgba(255,255,255,0.6); }
+
+  .msg-status {
+    font-size: 10px;
+    color: #777;
+    margin-top: 1px;
+    text-align: right;
+  }
+
+  .msg.from-me .msg-status { color: rgba(255,255,255,0.5); }
 
   /* Compose */
   #compose {
@@ -208,7 +244,10 @@
   <div id="chat-list">
     {% for chat in chats %}
     <div class="chat-item" data-chat-id="{{ chat.chat_identifier }}" data-chat-style="{{ chat.style }}" data-chat-name="{{ chat.display_name }}">
-      <div class="chat-item-name">{{ chat.display_name }}</div>
+      <div class="chat-item-row">
+        <div class="chat-item-name">{{ chat.display_name }}</div>
+        <span class="unread-badge">0</span>
+      </div>
       <div class="chat-item-preview">{{ chat.last_text }}</div>
     </div>
     {% endfor %}
@@ -232,6 +271,7 @@ const state = {
   chatStyle: 45,
   chatName: '',
   ws: null,
+  unread: {},  // chat_identifier -> count
 };
 
 // --- WebSocket ---
@@ -252,11 +292,22 @@ function connectWS() {
 
   state.ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
-    if (data.type === 'message' && data.chat_identifier === state.chatId) {
-      appendMessage(data);
+    if (data.type === 'message') {
+      if (data.chat_identifier === state.chatId) {
+        appendMessage(data);
+        showLastStatus();
+      } else if (!data.is_from_me) {
+        const cid = data.chat_identifier;
+        state.unread[cid] = (state.unread[cid] || 0) + 1;
+        updateUnreadBadge(cid);
+        updateTitle();
+      }
+      updateSidebarPreview(data);
+    } else if (data.type === 'status_update') {
+      if (data.chat_identifier === state.chatId) {
+        updateLastSentStatus(data.status);
+      }
     }
-    // Update sidebar preview
-    updateSidebarPreview(data);
   };
 }
 
@@ -270,6 +321,24 @@ function updateSidebarPreview(data) {
   }
 }
 
+function updateUnreadBadge(chatId) {
+  const item = document.querySelector(`.chat-item[data-chat-id="${CSS.escape(chatId)}"]`);
+  if (!item) return;
+  const count = state.unread[chatId] || 0;
+  const badge = item.querySelector('.unread-badge');
+  if (count > 0) {
+    item.classList.add('unread');
+    badge.textContent = count > 99 ? '99+' : count;
+  } else {
+    item.classList.remove('unread');
+  }
+}
+
+function updateTitle() {
+  const total = Object.values(state.unread).reduce((a, b) => a + b, 0);
+  document.title = total > 0 ? `(${total}) iMessage Bridge` : 'iMessage Bridge';
+}
+
 // --- Chat selection ---
 document.getElementById('chat-list').addEventListener('click', async (e) => {
   const item = e.target.closest('.chat-item');
@@ -279,6 +348,11 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   item.classList.add('active');
 
   state.chatId = item.dataset.chatId;
+
+  // Clear unread for this chat
+  delete state.unread[state.chatId];
+  updateUnreadBadge(state.chatId);
+  updateTitle();
   state.chatStyle = parseInt(item.dataset.chatStyle) || 45;
   state.chatName = item.dataset.chatName;
 
@@ -298,6 +372,7 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
 
   messagesEl.innerHTML = '';
   messages.forEach(msg => appendMessage(msg));
+  showLastStatus();
   messagesEl.scrollTop = messagesEl.scrollHeight;
 });
 
@@ -353,9 +428,46 @@ function appendMessage(msg) {
     html += `<div class="msg-time">${time}</div>`;
   }
 
+  if (msg.is_from_me && msg.status) {
+    const labels = { read: 'Read', delivered: 'Delivered', sent: 'Sent' };
+    const label = labels[msg.status] || '';
+    if (label) {
+      html += `<div class="msg-status" style="display:none">${label}</div>`;
+    }
+  }
+
   div.innerHTML = html;
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function updateLastSentStatus(status) {
+  const labels = { read: 'Read', delivered: 'Delivered', sent: 'Sent' };
+  const label = labels[status] || '';
+  const sentMsgs = document.querySelectorAll('#messages .msg.from-me');
+  if (sentMsgs.length === 0) return;
+  const last = sentMsgs[sentMsgs.length - 1];
+  let el = last.querySelector('.msg-status');
+  if (el) {
+    el.textContent = label;
+  } else if (label) {
+    el = document.createElement('div');
+    el.className = 'msg-status';
+    el.textContent = label;
+    last.appendChild(el);
+  }
+  showLastStatus();
+}
+
+function showLastStatus() {
+  // Like iMessage: only show status on the very last sent message
+  document.querySelectorAll('#messages .msg-status').forEach(el => el.style.display = 'none');
+  const sentMsgs = document.querySelectorAll('#messages .msg.from-me');
+  if (sentMsgs.length > 0) {
+    const last = sentMsgs[sentMsgs.length - 1];
+    const status = last.querySelector('.msg-status');
+    if (status) status.style.display = 'block';
+  }
 }
 
 function escapeHtml(text) {

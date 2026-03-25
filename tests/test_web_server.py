@@ -111,7 +111,7 @@ def _create_test_chatdb(path):
             ROWID INTEGER PRIMARY KEY, text TEXT, is_from_me INTEGER DEFAULT 0,
             date INTEGER, handle_id INTEGER, cache_has_attachments INTEGER DEFAULT 0,
             item_type INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
-            attributedBody BLOB
+            attributedBody BLOB, date_delivered INTEGER DEFAULT 0, date_read INTEGER DEFAULT 0
         );
         CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
 
@@ -145,7 +145,7 @@ def _create_test_chatdb(path):
 
 def test_get_recent_chats(tmp_path):
     db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
-    chats = get_recent_chats(db_path)
+    chats = get_recent_chats(db_path, {})
     assert len(chats) == 2
     # Most recent chat first (group has higher ROWIDs)
     assert chats[0]["chat_identifier"] == "group123"
@@ -156,7 +156,7 @@ def test_get_recent_chats(tmp_path):
 
 def test_get_chat_messages(tmp_path):
     db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
-    messages = get_chat_messages(db_path, "+15551234567")
+    messages = get_chat_messages(db_path, "+15551234567", {})
     assert len(messages) == 3
     assert messages[0]["text"] == "msg 1"
     assert messages[2]["text"] == "msg 3"
@@ -168,11 +168,11 @@ def test_get_chat_messages(tmp_path):
 
 def test_get_chat_messages_empty(tmp_path):
     db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
-    messages = get_chat_messages(db_path, "nonexistent")
+    messages = get_chat_messages(db_path, "nonexistent", {})
     assert messages == []
 
 
 def test_get_recent_chats_limit(tmp_path):
     db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
-    chats = get_recent_chats(db_path, limit=1)
+    chats = get_recent_chats(db_path, {}, limit=1)
     assert len(chats) == 1
