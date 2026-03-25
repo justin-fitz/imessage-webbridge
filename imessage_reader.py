@@ -19,7 +19,6 @@ LEFT JOIN handle h ON m.handle_id = h.ROWID
 WHERE m.ROWID > ?
   AND m.item_type = 0
   AND m.associated_message_type = 0
-  AND NOT (m.text IS NULL AND m.cache_has_attachments = 0)
 ORDER BY m.ROWID ASC
 """
 
