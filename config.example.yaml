@@ -1,0 +1,14 @@
+discord:
+  bot_token: "YOUR_BOT_TOKEN"
+  guild_id: 123456789
+  category_name: "iMessage"
+
+imessage:
+  db_path: "~/Library/Messages/chat.db"
+  attachments_path: "~/Library/Messages/Attachments/"
+  poll_interval_seconds: 2
+
+bridge:
+  allowed_chats: []  # empty = bridge all chats
+  state_db: "db/bridge.db"
+  temp_dir: "tmp/"
