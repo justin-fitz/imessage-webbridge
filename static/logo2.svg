@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <defs>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#5856D6"/>
+      <stop offset="100%" style="stop-color:#0b84fe"/>
+    </linearGradient>
+  </defs>
+  <rect width="120" height="120" rx="27" fill="url(#g2)"/>
+  <!-- Browser window -->
+  <rect x="22" y="25" width="50" height="40" rx="5" fill="white" opacity="0.9"/>
+  <rect x="22" y="25" width="50" height="10" rx="5" fill="white"/>
+  <rect x="22" y="35" width="50" height="1" fill="#5856D6" opacity="0.3"/>
+  <circle cx="29" cy="30" r="2" fill="#ff5f57"/>
+  <circle cx="35" cy="30" r="2" fill="#febc2e"/>
+  <circle cx="41" cy="30" r="2" fill="#28c840"/>
+  <!-- iMessage bubble -->
+  <path d="M65 50c-12 0-22 8.5-22 19s10 19 22 19c2.8 0 5.5-.5 8-1.3l9 4.5-2-8C85.5 79 88 73.5 88 69c0-10.5-10-19-23-19z" fill="#34C759"/>
+  <rect x="55" y="63" width="20" height="2.5" rx="1.2" fill="white" opacity="0.9"/>
+  <rect x="55" y="69" width="14" height="2.5" rx="1.2" fill="white" opacity="0.7"/>
+  <rect x="55" y="75" width="17" height="2.5" rx="1.2" fill="white" opacity="0.5"/>
+</svg>

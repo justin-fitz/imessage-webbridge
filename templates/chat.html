@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>iMessage Web Gateway</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo2.svg">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -431,7 +432,7 @@
 
 <input type="hidden" id="ws-token" value="{{ ws_token }}">
 <div id="sidebar">
-  <div id="sidebar-header">iMessage</div>
+  <div id="sidebar-header"><img src="/static/logo2.svg" alt="" width="28" height="28" style="vertical-align:middle;margin-right:8px;border-radius:6px">iMessage</div>
   <div id="chat-list">
     {% for chat in chats %}
     <div class="chat-item" data-chat-id="{{ chat.chat_identifier }}" data-chat-style="{{ chat.style }}" data-chat-name="{{ chat.display_name }}">
