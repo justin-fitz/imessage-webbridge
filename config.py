@@ -22,7 +22,7 @@ class IMessageConfig:
 
 
 @dataclass
-class BridgeConfig:
+class AppConfig:
     allowed_chats: list[str] = field(default_factory=list)
     state_db: str = "db/bridge.db"
     temp_dir: str = "tmp/"
@@ -31,7 +31,7 @@ class BridgeConfig:
 @dataclass
 class Config:
     imessage: IMessageConfig
-    bridge: BridgeConfig
+    app: AppConfig
     web: WebConfig
 
 
@@ -46,8 +46,8 @@ def load_config(path: str) -> Config:
         poll_interval_seconds=im.get("poll_interval_seconds", 2),
     )
 
-    br = raw.get("bridge", {})
-    bridge_cfg = BridgeConfig(
+    br = raw.get("app", {})
+    app_cfg = AppConfig(
         allowed_chats=br.get("allowed_chats", []),
         state_db=br.get("state_db", "db/bridge.db"),
         temp_dir=br.get("temp_dir", "tmp/"),
@@ -63,4 +63,4 @@ def load_config(path: str) -> Config:
         max_message_length=w.get("max_message_length", 10000),
     )
 
-    return Config(imessage=imessage_cfg, bridge=bridge_cfg, web=web_cfg)
+    return Config(imessage=imessage_cfg, app=app_cfg, web=web_cfg)

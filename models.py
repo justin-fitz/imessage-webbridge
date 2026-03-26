@@ -3,7 +3,7 @@ from datetime import datetime
 
 
 @dataclass
-class BridgeAttachment:
+class ChatAttachment:
     filename: str
     mime_type: str | None
     transfer_name: str
@@ -11,7 +11,7 @@ class BridgeAttachment:
 
 
 @dataclass
-class BridgeMessage:
+class ChatMessage:
     rowid: int
     text: str | None
     is_from_me: bool
@@ -20,4 +20,4 @@ class BridgeMessage:
     chat_display_name: str
     chat_style: int  # 43 = group, 45 = 1-on-1
     timestamp: datetime
-    attachments: list[BridgeAttachment] = field(default_factory=list)
+    attachments: list[ChatAttachment] = field(default_factory=list)

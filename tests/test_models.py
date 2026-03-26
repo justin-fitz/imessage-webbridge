@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 
-from models import BridgeAttachment, BridgeMessage
+from models import ChatAttachment, ChatMessage
 
 
-def test_bridge_message_defaults():
-    msg = BridgeMessage(
+def test_chat_message_defaults():
+    msg = ChatMessage(
         rowid=1,
         text="hello",
         is_from_me=False,
@@ -19,14 +19,14 @@ def test_bridge_message_defaults():
     assert msg.is_from_me is False
 
 
-def test_bridge_message_with_attachments():
-    att = BridgeAttachment(
+def test_chat_message_with_attachments():
+    att = ChatAttachment(
         filename="/path/to/photo.jpg",
         mime_type="image/jpeg",
         transfer_name="photo.jpg",
         total_bytes=1024,
     )
-    msg = BridgeMessage(
+    msg = ChatMessage(
         rowid=2,
         text=None,
         is_from_me=True,

@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from web_server import ConnectionManager, WebBridge, get_chat_messages, get_recent_chats
+from web_server import ConnectionManager, WebHandler, get_chat_messages, get_recent_chats
 from imessage_reader import APPLE_EPOCH_OFFSET
-from models import BridgeMessage
+from models import ChatMessage
 
 
 # --- ConnectionManager tests ---
@@ -56,16 +56,16 @@ async def test_connection_manager_removes_dead_connections():
     assert ws_good in mgr.active
 
 
-# --- WebBridge tests ---
+# --- WebHandler tests ---
 
 @pytest.mark.asyncio
-async def test_web_bridge_forward():
+async def test_web_handler_forward():
     mgr = ConnectionManager()
     ws = AsyncMock()
     await mgr.connect(ws)
-    handler = WebBridge(mgr)
+    handler = WebHandler(mgr)
 
-    msg = BridgeMessage(
+    msg = ChatMessage(
         rowid=1, text="hello", is_from_me=False, sender_id="+15551234567",
         chat_identifier="+15551234567", chat_display_name="",
         chat_style=45, timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
@@ -80,22 +80,22 @@ async def test_web_bridge_forward():
 
 
 @pytest.mark.asyncio
-async def test_web_bridge_forward_with_attachments(tmp_path):
+async def test_web_handler_forward_with_attachments(tmp_path):
     mgr = ConnectionManager()
     ws = AsyncMock()
     await mgr.connect(ws)
-    handler = WebBridge(mgr)
+    handler = WebHandler(mgr)
 
     # Create a real temp file so the attachment passes the exists() check
     photo = tmp_path / "photo.jpg"
     photo.write_bytes(b"\xff\xd8\xff\xe0")
 
-    from models import BridgeAttachment
-    msg = BridgeMessage(
+    from models import ChatAttachment
+    msg = ChatMessage(
         rowid=2, text=None, is_from_me=True, sender_id="me",
         chat_identifier="chat123", chat_display_name="Group",
         chat_style=43, timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        attachments=[BridgeAttachment(str(photo), "image/jpeg", "photo.jpg", 1024)],
+        attachments=[ChatAttachment(str(photo), "image/jpeg", "photo.jpg", 1024)],
     )
     await handler.forward_to_output(msg)
 

@@ -3,8 +3,8 @@ imessage:
   attachments_path: "~/Library/Messages/Attachments/"
   poll_interval_seconds: 2
 
-bridge:
-  allowed_chats: []  # empty = bridge all chats
+app:
+  allowed_chats: []  # empty = all chats
   state_db: "db/bridge.db"
   temp_dir: "tmp/"
 

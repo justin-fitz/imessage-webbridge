@@ -8,17 +8,17 @@ from channel_map import ChannelMap
 from config import Config
 from imessage_reader import IMessageReader
 from imessage_sender import IMessageSender
-from models import BridgeMessage
+from models import ChatMessage
 
 
 class MessageHandler(Protocol):
-    async def forward_to_output(self, msg: BridgeMessage) -> None: ...
+    async def forward_to_output(self, msg: ChatMessage) -> None: ...
 
 
-class Bridge:
+class AppCore:
     def __init__(self, config: Config):
         self.config = config
-        self.channel_map = ChannelMap(config.bridge.state_db)
+        self.channel_map = ChannelMap(config.app.state_db)
         self.reader = IMessageReader(config.imessage.db_path, self.channel_map)
         self.sender = IMessageSender()
         self._handlers: list[MessageHandler] = []
@@ -51,8 +51,8 @@ class Bridge:
             self.sender.send_text(chat_identifier, chat_style, text)
             self._mark_sent(chat_identifier, text, None)
 
-    def _should_skip(self, msg: BridgeMessage) -> bool:
-        if self.config.bridge.allowed_chats and msg.chat_identifier not in self.config.bridge.allowed_chats:
+    def _should_skip(self, msg: ChatMessage) -> bool:
+        if self.config.app.allowed_chats and msg.chat_identifier not in self.config.app.allowed_chats:
             return True
         if msg.is_from_me and self._was_recently_sent(msg):
             return True
@@ -62,7 +62,7 @@ class Bridge:
         key = self._dedup_key(chat_identifier, text, filename)
         self._recently_sent[key] = time.time()
 
-    def _was_recently_sent(self, msg: BridgeMessage) -> bool:
+    def _was_recently_sent(self, msg: ChatMessage) -> bool:
         if msg.text:
             key = self._dedup_key(msg.chat_identifier, msg.text, None)
             sent_at = self._recently_sent.get(key)

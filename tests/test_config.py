@@ -21,7 +21,7 @@ imessage:
   db_path: "~/Library/Messages/chat.db"
   poll_interval_seconds: 5
 
-bridge:
+app:
   allowed_chats:
     - "+15551234567"
   state_db: "db/bridge.db"
@@ -34,7 +34,7 @@ web:
     cfg = load_config(path)
     assert cfg.imessage.poll_interval_seconds == 5
     assert "~" not in cfg.imessage.db_path  # expanded
-    assert cfg.bridge.allowed_chats == ["+15551234567"]
+    assert cfg.app.allowed_chats == ["+15551234567"]
     assert cfg.web.host == "0.0.0.0"
     assert cfg.web.port == 9090
 
@@ -46,7 +46,7 @@ imessage:
 """)
     cfg = load_config(path)
     assert cfg.imessage.poll_interval_seconds == 2  # default
-    assert cfg.bridge.allowed_chats == []  # default
+    assert cfg.app.allowed_chats == []  # default
     assert cfg.web.host == "127.0.0.1"  # default
     assert cfg.web.port == 8080  # default
 
@@ -69,4 +69,4 @@ web:
     assert cfg.web.port == 9999
     assert cfg.web.host == "127.0.0.1"
     assert cfg.imessage.poll_interval_seconds == 2
-    assert cfg.bridge.allowed_chats == []
+    assert cfg.app.allowed_chats == []

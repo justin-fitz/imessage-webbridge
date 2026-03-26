@@ -12,10 +12,10 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from bridge import Bridge
+from app_core import AppCore
 from contacts import get_group_members, load_contacts, resolve_identifier
 from imessage_reader import APPLE_EPOCH_OFFSET
-from models import BridgeMessage
+from models import ChatMessage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -141,12 +141,12 @@ class StatusPoller:
             self._status_cache = {k: v for k, v in self._status_cache.items() if k in keep}
 
 
-class WebBridge:
+class WebHandler:
     def __init__(self, manager: ConnectionManager, contacts: dict[str, str] | None = None):
         self.manager = manager
         self.contacts = contacts or {}
 
-    async def forward_to_output(self, msg: BridgeMessage):
+    async def forward_to_output(self, msg: ChatMessage):
         sender_name = msg.sender_id
         if msg.sender_id and msg.sender_id != "me":
             sender_name = resolve_identifier(msg.sender_id, self.contacts) or msg.sender_id
@@ -368,7 +368,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
 LOGIN_HTML = """<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>iMessage WebBridge - Login</title>
+<title>iMessage Web Gateway - Login</title>
 <style>
   body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #e0e0e0;
          display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
@@ -384,7 +384,7 @@ LOGIN_HTML = """<!DOCTYPE html>
 </style>
 </head><body>
 <form method="POST" action="/login">
-  <h2>iMessage WebBridge</h2>
+  <h2>iMessage Web Gateway</h2>
   <input type="password" name="password" placeholder="Password" autofocus>
   <button type="submit">Login</button>
   {error}
@@ -392,20 +392,20 @@ LOGIN_HTML = """<!DOCTYPE html>
 </body></html>"""
 
 
-def create_app(bridge: Bridge) -> FastAPI:
+def create_app(core: AppCore) -> FastAPI:
     app = FastAPI()
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
-    manager = ConnectionManager(max_connections=bridge.config.web.max_connections)
+    manager = ConnectionManager(max_connections=core.config.web.max_connections)
     contacts = load_contacts()
-    web_handler = WebBridge(manager, contacts)
-    bridge.add_handler(web_handler)
+    web_handler = WebHandler(manager, contacts)
+    core.add_handler(web_handler)
     print(f"Loaded {len(contacts)} contacts from AddressBook")
 
-    status_poller = StatusPoller(bridge.config.imessage.db_path, manager)
-    known_chats = _get_known_chat_identifiers(bridge.config.imessage.db_path)
-    password = bridge.config.web.password
-    max_msg_len = bridge.config.web.max_message_length
-    allowed_origins = set(bridge.config.web.allowed_origins)
+    status_poller = StatusPoller(core.config.imessage.db_path, manager)
+    known_chats = _get_known_chat_identifiers(core.config.imessage.db_path)
+    password = core.config.web.password
+    max_msg_len = core.config.web.max_message_length
+    allowed_origins = set(core.config.web.allowed_origins)
 
     def require_auth(session: str | None = Cookie(default=None, alias="session")):
         if not password:
@@ -415,12 +415,12 @@ def create_app(bridge: Bridge) -> FastAPI:
 
     @app.on_event("startup")
     async def startup():
-        asyncio.create_task(bridge.poll_loop())
+        asyncio.create_task(core.poll_loop())
         asyncio.create_task(status_poller.poll_loop())
         asyncio.create_task(_attachment_prune_loop())
         if not password:
             print("WARNING: No password set — web UI is unauthenticated!")
-        print(f"Web UI started — http://{bridge.config.web.host}:{bridge.config.web.port}")
+        print(f"Web UI started — http://{core.config.web.host}:{core.config.web.port}")
 
     async def _attachment_prune_loop():
         while True:
@@ -446,21 +446,21 @@ def create_app(bridge: Bridge) -> FastAPI:
     async def index(request: Request, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             return RedirectResponse("/login", status_code=303)
-        chats = get_recent_chats(bridge.config.imessage.db_path, contacts)
+        chats = get_recent_chats(core.config.imessage.db_path, contacts)
         return templates.TemplateResponse(request, "chat.html", {"chats": chats, "ws_token": session or ""})
 
     @app.get("/api/chats")
     async def api_chats(session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
-        return get_recent_chats(bridge.config.imessage.db_path, contacts)
+        return get_recent_chats(core.config.imessage.db_path, contacts)
 
     @app.get("/api/chats/{chat_identifier:path}/messages")
     async def api_messages(chat_identifier: str, offset: int = 0, limit: int = 100, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
         limit = min(limit, 200)
-        return get_chat_messages(bridge.config.imessage.db_path, chat_identifier, contacts, limit=limit, offset=offset)
+        return get_chat_messages(core.config.imessage.db_path, chat_identifier, contacts, limit=limit, offset=offset)
 
     @app.get("/api/attachments/{token}/{filename}")
     async def serve_attachment(token: str, filename: str, session: str | None = Cookie(default=None, alias="session")):
@@ -478,9 +478,9 @@ def create_app(bridge: Bridge) -> FastAPI:
 
         ext = os.path.splitext(filepath)[1].lower()
         if ext in (".heic", ".heif"):
-            jpeg_path = os.path.join(bridge.config.bridge.temp_dir, f"{token}.jpg")
+            jpeg_path = os.path.join(core.config.app.temp_dir, f"{token}.jpg")
             if not os.path.exists(jpeg_path):
-                os.makedirs(bridge.config.bridge.temp_dir, exist_ok=True)
+                os.makedirs(core.config.app.temp_dir, exist_ok=True)
                 import subprocess
                 subprocess.run(
                     ["sips", "-s", "format", "jpeg", "-s", "formatOptions", "80", filepath, "--out", jpeg_path],
@@ -528,7 +528,7 @@ def create_app(bridge: Bridge) -> FastAPI:
                     if len(text) > max_msg_len:
                         text = text[:max_msg_len]
                     if text:
-                        bridge.send_to_imessage(chat_id, chat_style, text=text)
+                        core.send_to_imessage(chat_id, chat_style, text=text)
         except WebSocketDisconnect:
             manager.disconnect(ws)
         except Exception:

@@ -3,7 +3,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from channel_map import ChannelMap
-from models import BridgeAttachment, BridgeMessage
+from models import ChatAttachment, ChatMessage
 
 APPLE_EPOCH_OFFSET = 978307200
 
@@ -48,7 +48,7 @@ class IMessageReader:
             self.last_seen_rowid = row["max_id"] or 0
             self.channel_map.set_state("last_seen_rowid", str(self.last_seen_rowid))
 
-    def poll(self) -> list[BridgeMessage]:
+    def poll(self) -> list[ChatMessage]:
         rows = self.conn.execute(MESSAGES_QUERY, (self.last_seen_rowid,)).fetchall()
         messages = []
         for row in rows:
@@ -60,7 +60,7 @@ class IMessageReader:
             if text is None and row["attributedBody"]:
                 text = self._extract_attributed_text(row["attributedBody"])
 
-            msg = BridgeMessage(
+            msg = ChatMessage(
                 rowid=row["ROWID"],
                 text=text,
                 is_from_me=bool(row["is_from_me"]),
@@ -79,7 +79,7 @@ class IMessageReader:
 
         return messages
 
-    def _get_attachments(self, message_rowid: int) -> list[BridgeAttachment]:
+    def _get_attachments(self, message_rowid: int) -> list[ChatAttachment]:
         rows = self.conn.execute(ATTACHMENTS_QUERY, (message_rowid,)).fetchall()
         attachments = []
         for row in rows:
@@ -87,7 +87,7 @@ class IMessageReader:
             if filename:
                 filename = os.path.expanduser(filename)
             attachments.append(
-                BridgeAttachment(
+                ChatAttachment(
                     filename=filename or "",
                     mime_type=row["mime_type"],
                     transfer_name=row["transfer_name"] or os.path.basename(filename or ""),

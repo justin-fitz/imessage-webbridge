@@ -1,4 +1,4 @@
-# iMessage WebBridge
+# iMessage Web Gateway
 
 A local macOS application that provides a web UI for iMessage. Supports bidirectional messaging with attachments, contact name resolution, tapback reactions, delivery/read status, and inline image display.
 
@@ -62,10 +62,10 @@ imessage:
   db_path: "~/Library/Messages/chat.db"
   poll_interval_seconds: 2
 
-bridge:
-  allowed_chats: []              # empty = bridge all chats
+app:
+  allowed_chats: []              # empty = all chats forwarded
   # allowed_chats:
-  #   - "+15551234567"           # only bridge specific conversations
+  #   - "+15551234567"           # only forward specific conversations
 
 web:
   host: "127.0.0.1"             # use "0.0.0.0" for network access
