@@ -525,6 +525,15 @@ def create_app(core: AppCore) -> FastAPI:
             return resp
         return HTMLResponse(LOGIN_HTML.replace("{error}", '<div class="error">Invalid password</div>'), status_code=401)
 
+    @app.get("/logout")
+    async def logout(session: str | None = Cookie(default=None, alias="session")):
+        if session and _session_db:
+            _session_db.execute("DELETE FROM sessions WHERE token = ?", (session,))
+            _session_db.commit()
+        resp = RedirectResponse("/login", status_code=303)
+        resp.delete_cookie("session")
+        return resp
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
