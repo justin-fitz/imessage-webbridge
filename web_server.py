@@ -1,11 +1,15 @@
 import asyncio
 import json
 import os
+import secrets
 import sqlite3
+import time
+import urllib.parse
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
@@ -17,18 +21,25 @@ from models import BridgeMessage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+security = HTTPBasic()
 
 
 class ConnectionManager:
-    def __init__(self):
+    def __init__(self, max_connections: int = 20):
         self.active: list[WebSocket] = []
+        self.max_connections = max_connections
 
     async def connect(self, ws: WebSocket):
+        if len(self.active) >= self.max_connections:
+            await ws.close(code=1008, reason="Too many connections")
+            return False
         await ws.accept()
         self.active.append(ws)
+        return True
 
     def disconnect(self, ws: WebSocket):
-        self.active.remove(ws)
+        if ws in self.active:
+            self.active.remove(ws)
 
     async def broadcast(self, data: dict):
         message = json.dumps(data)
@@ -36,7 +47,8 @@ class ConnectionManager:
             try:
                 await ws.send_text(message)
             except Exception:
-                self.active.remove(ws)
+                if ws in self.active:
+                    self.active.remove(ws)
 
 
 class StatusPoller:
@@ -46,7 +58,6 @@ class StatusPoller:
         self.db_path = db_path
         self.manager = manager
         self.interval = interval
-        # Track known status: rowid -> "sent" | "delivered" | "read"
         self._status_cache: dict[int, str] = {}
 
     async def poll_loop(self):
@@ -79,23 +90,22 @@ class StatusPoller:
             dr = row["date_read"]
             dd = row["date_delivered"]
             if dr and dr != 0:
-                status = "read"
+                s = "read"
             elif dd and dd != 0:
-                status = "delivered"
+                s = "delivered"
             else:
-                status = "sent"
+                s = "sent"
 
             old = self._status_cache.get(rid)
-            if old != status:
-                self._status_cache[rid] = status
+            if old != s:
+                self._status_cache[rid] = s
                 if old is not None:
                     await self.manager.broadcast({
                         "type": "status_update",
                         "chat_identifier": row["chat_identifier"],
-                        "status": status,
+                        "status": s,
                     })
 
-        # Prune old entries
         if len(self._status_cache) > 100:
             keep = {row["ROWID"] for row in rows}
             self._status_cache = {k: v for k, v in self._status_cache.items() if k in keep}
@@ -122,15 +132,19 @@ class WebBridge:
             "text": msg.text,
             "timestamp": msg.timestamp.isoformat(),
             "attachments": [
-                {"transfer_name": a.transfer_name, "mime_type": a.mime_type}
+                {
+                    "transfer_name": a.transfer_name,
+                    "mime_type": a.mime_type,
+                    "url": _register_attachment(a.filename),
+                }
                 for a in msg.attachments
+                if a.filename and os.path.exists(a.filename)
             ],
         }
         await self.manager.broadcast(data)
 
 
 def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) -> list[dict]:
-    """Load recent conversations from chat.db for the sidebar."""
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
@@ -155,15 +169,13 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
     for row in rows:
         display_name = row["display_name"] or ""
         style = row["style"]
-
         if not display_name:
-            if style == 43:  # group chat
+            if style == 43:
                 members = get_group_members(db_path, row["chat_identifier"])
                 member_names = [resolve_identifier(m, contacts) or m for m in members]
                 display_name = ", ".join(member_names)
-            else:  # 1-on-1
+            else:
                 display_name = resolve_identifier(row["chat_identifier"], contacts) or row["chat_identifier"]
-
         chats.append({
             "chat_identifier": row["chat_identifier"],
             "display_name": display_name,
@@ -173,12 +185,64 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
     return chats
 
 
+# Attachment registry: token -> (filepath, created_at)
+_attachment_registry: dict[str, tuple[str, float]] = {}
+_ATTACHMENT_TTL = 3600  # 1 hour
+
+
+def _register_attachment(filepath: str) -> str | None:
+    if not filepath or not os.path.exists(filepath):
+        return None
+    token = secrets.token_urlsafe(24)
+    _attachment_registry[token] = (filepath, time.time())
+    name = os.path.basename(filepath)
+    return f"/api/attachments/{token}/{urllib.parse.quote(name)}"
+
+
+def _prune_attachments():
+    now = time.time()
+    expired = [k for k, (_, ts) in _attachment_registry.items() if now - ts > _ATTACHMENT_TTL]
+    for k in expired:
+        del _attachment_registry[k]
+
+
+def _get_attachments_for_message(conn, message_rowid: int) -> list[dict]:
+    rows = conn.execute("""
+        SELECT a.filename, a.mime_type, a.transfer_name, a.total_bytes
+        FROM attachment a
+        JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id
+        WHERE maj.message_id = ?
+          AND a.mime_type IS NOT NULL
+    """, (message_rowid,)).fetchall()
+    attachments = []
+    for row in rows:
+        filename = row["filename"]
+        if filename:
+            filename = os.path.expanduser(filename)
+        url = _register_attachment(filename) if filename else None
+        if url:
+            attachments.append({
+                "transfer_name": row["transfer_name"] or os.path.basename(filename),
+                "mime_type": row["mime_type"],
+                "url": url,
+            })
+    return attachments
+
+
+def _get_known_chat_identifiers(db_path: str) -> set[str]:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT chat_identifier FROM chat").fetchall()
+    conn.close()
+    return {row["chat_identifier"] for row in rows}
+
+
 def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, str], limit: int = 100) -> list[dict]:
-    """Load recent messages for a specific chat."""
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
-        SELECT m.text, m.is_from_me, m.date, m.attributedBody,
+        SELECT m.ROWID, m.text, m.is_from_me, m.date, m.attributedBody,
+               m.cache_has_attachments,
                m.date_delivered, m.date_read, h.id as sender_id
         FROM message m
         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
@@ -190,7 +254,6 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
         ORDER BY m.ROWID DESC
         LIMIT ?
     """, (chat_identifier, limit)).fetchall()
-    conn.close()
 
     from imessage_reader import IMessageReader
 
@@ -199,13 +262,18 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
         text = row["text"]
         if text is None and row["attributedBody"]:
             text = IMessageReader._extract_attributed_text(row["attributedBody"])
+
+        attachments = []
+        if row["cache_has_attachments"]:
+            attachments = _get_attachments_for_message(conn, row["ROWID"])
+
         date = row["date"]
         if date and date != 0:
             ts = datetime.fromtimestamp(date / 1_000_000_000 + APPLE_EPOCH_OFFSET, tz=timezone.utc).isoformat()
         else:
             ts = ""
-        if text is None and row["attributedBody"] is None:
-            continue  # skip delivery receipts
+        if text is None and not attachments and row["attributedBody"] is None:
+            continue
         sender_id = row["sender_id"] or "me"
         sender_name = resolve_identifier(sender_id, contacts) if sender_id != "me" else "me"
 
@@ -226,54 +294,135 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
             "sender_id": sender_name or sender_id,
             "timestamp": ts,
             "status": status,
+            "attachments": attachments,
         })
+
+    conn.close()
     return messages
 
 
 def create_app(bridge: Bridge) -> FastAPI:
     app = FastAPI()
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
-    manager = ConnectionManager()
+    manager = ConnectionManager(max_connections=bridge.config.web.max_connections)
     contacts = load_contacts()
     web_handler = WebBridge(manager, contacts)
     bridge.add_handler(web_handler)
     print(f"Loaded {len(contacts)} contacts from AddressBook")
 
     status_poller = StatusPoller(bridge.config.imessage.db_path, manager)
+    known_chats = _get_known_chat_identifiers(bridge.config.imessage.db_path)
+    password = bridge.config.web.password
+    max_msg_len = bridge.config.web.max_message_length
+    allowed_origins = set(bridge.config.web.allowed_origins)
+
+    def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+        if not password:
+            return credentials
+        if not secrets.compare_digest(credentials.password, password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        return credentials
 
     @app.on_event("startup")
     async def startup():
         asyncio.create_task(bridge.poll_loop())
         asyncio.create_task(status_poller.poll_loop())
+        asyncio.create_task(_attachment_prune_loop())
+        if not password:
+            print("WARNING: No password set — web UI is unauthenticated!")
         print(f"Web UI started — http://{bridge.config.web.host}:{bridge.config.web.port}")
 
+    async def _attachment_prune_loop():
+        while True:
+            _prune_attachments()
+            await asyncio.sleep(300)
+
     @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request):
+    async def index(request: Request, _=Depends(verify_credentials)):
         chats = get_recent_chats(bridge.config.imessage.db_path, contacts)
-        return templates.TemplateResponse(request, "chat.html", {"chats": chats})
+        return templates.TemplateResponse(request, "chat.html", {"chats": chats, "ws_token": password})
 
     @app.get("/api/chats")
-    async def api_chats():
+    async def api_chats(_=Depends(verify_credentials)):
         return get_recent_chats(bridge.config.imessage.db_path, contacts)
 
     @app.get("/api/chats/{chat_identifier:path}/messages")
-    async def api_messages(chat_identifier: str):
+    async def api_messages(chat_identifier: str, _=Depends(verify_credentials)):
         return get_chat_messages(bridge.config.imessage.db_path, chat_identifier, contacts)
+
+    @app.get("/api/attachments/{token}/{filename}")
+    async def serve_attachment(token: str, filename: str, _=Depends(verify_credentials)):
+        entry = _attachment_registry.get(token)
+        if not entry:
+            raise HTTPException(status_code=404)
+        filepath, created_at = entry
+        if time.time() - created_at > _ATTACHMENT_TTL:
+            del _attachment_registry[token]
+            raise HTTPException(status_code=404)
+        if not os.path.exists(filepath):
+            raise HTTPException(status_code=404)
+
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in (".heic", ".heif"):
+            jpeg_path = os.path.join(bridge.config.bridge.temp_dir, f"{token}.jpg")
+            if not os.path.exists(jpeg_path):
+                os.makedirs(bridge.config.bridge.temp_dir, exist_ok=True)
+                import subprocess
+                subprocess.run(
+                    ["sips", "-s", "format", "jpeg", "-s", "formatOptions", "80", filepath, "--out", jpeg_path],
+                    capture_output=True, timeout=15,
+                )
+            if os.path.exists(jpeg_path):
+                return FileResponse(jpeg_path, media_type="image/jpeg")
+
+        return FileResponse(filepath)
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
-        await manager.connect(ws)
+        # Check Origin header
+        origin = ws.headers.get("origin", "")
+        if allowed_origins and origin and origin not in allowed_origins:
+            await ws.close(code=1008, reason="Origin not allowed")
+            return
+
+        # Authenticate via query param token (password)
+        if password:
+            token = ws.query_params.get("token", "")
+            if not secrets.compare_digest(token, password):
+                await ws.close(code=1008, reason="Unauthorized")
+                return
+
+        connected = await manager.connect(ws)
+        if not connected:
+            return
         try:
             while True:
                 data = await ws.receive_text()
+                if len(data) > max_msg_len * 2:
+                    continue  # drop oversized frames
                 msg = json.loads(data)
                 if msg.get("type") == "send":
-                    chat_id = msg["chat_identifier"]
+                    chat_id = msg.get("chat_identifier", "")
                     chat_style = msg.get("chat_style", 45)
-                    text = msg.get("text")
+                    text = msg.get("text", "")
+
+                    # Validate chat exists
+                    if chat_id not in known_chats:
+                        continue
+
+                    # Cap message length
+                    if len(text) > max_msg_len:
+                        text = text[:max_msg_len]
+
                     if text:
                         bridge.send_to_imessage(chat_id, chat_style, text=text)
         except WebSocketDisconnect:
+            manager.disconnect(ws)
+        except Exception:
             manager.disconnect(ws)
 
     return app

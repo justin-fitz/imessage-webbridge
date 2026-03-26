@@ -15,6 +15,10 @@ class DiscordConfig:
 class WebConfig:
     host: str = "127.0.0.1"
     port: int = 8080
+    password: str = ""
+    allowed_origins: list[str] = field(default_factory=list)
+    max_connections: int = 20
+    max_message_length: int = 10000
 
 
 @dataclass
@@ -69,6 +73,10 @@ def load_config(path: str) -> Config:
     web_cfg = WebConfig(
         host=w.get("host", "127.0.0.1"),
         port=w.get("port", 8080),
+        password=w.get("password", ""),
+        allowed_origins=w.get("allowed_origins", []),
+        max_connections=w.get("max_connections", 20),
+        max_message_length=w.get("max_message_length", 10000),
     )
 
     return Config(discord=discord_cfg, imessage=imessage_cfg, bridge=bridge_cfg, web=web_cfg)

@@ -163,6 +163,29 @@
 
   .msg.from-me .msg-status { color: rgba(255,255,255,0.5); }
 
+  .msg:has(.msg-img) { max-width: 50%; }
+
+  .msg-img {
+    max-width: 100%;
+    border-radius: 12px;
+    margin-top: 4px;
+    cursor: pointer;
+  }
+
+  .msg-file {
+    display: inline-block;
+    padding: 6px 10px;
+    margin-top: 4px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 8px;
+    font-size: 12px;
+    color: #aaa;
+    text-decoration: none;
+  }
+
+  .msg-file:hover { background: rgba(255,255,255,0.15); }
+  .msg.from-me .msg-file { background: rgba(0,0,0,0.15); color: rgba(255,255,255,0.8); }
+
   /* Compose */
   #compose {
     padding: 12px 16px;
@@ -239,6 +262,7 @@
 </head>
 <body>
 
+<input type="hidden" id="ws-token" value="{{ ws_token }}">
 <div id="sidebar">
   <div id="sidebar-header">iMessage</div>
   <div id="chat-list">
@@ -277,7 +301,9 @@ const state = {
 // --- WebSocket ---
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  state.ws = new WebSocket(`${proto}//${location.host}/ws`);
+  const wsToken = document.getElementById('ws-token')?.value || '';
+  const tokenParam = wsToken ? `?token=${encodeURIComponent(wsToken)}` : '';
+  state.ws = new WebSocket(`${proto}//${location.host}/ws${tokenParam}`);
 
   state.ws.onopen = () => {
     document.getElementById('status-dot').className = 'dot connected';
@@ -418,8 +444,20 @@ function appendMessage(msg) {
 
   if (msg.text) {
     html += escapeHtml(msg.text);
-  } else if (msg.attachments && msg.attachments.length) {
-    html += `<em>${msg.attachments.map(a => a.transfer_name).join(', ')}</em>`;
+  }
+
+  if (msg.attachments && msg.attachments.length) {
+    for (const att of msg.attachments) {
+      if (!att.url) continue;
+      const mime = att.mime_type || '';
+      if (mime.startsWith('image/')) {
+        html += `<img class="msg-img" src="${att.url}" alt="${escapeHtml(att.transfer_name)}" loading="lazy" onclick="window.open(this.src)">`;
+      } else if (mime.startsWith('video/')) {
+        html += `<video class="msg-img" src="${att.url}" controls preload="metadata"></video>`;
+      } else {
+        html += `<a class="msg-file" href="${att.url}" target="_blank" download>${escapeHtml(att.transfer_name)}</a>`;
+      }
+    }
   }
 
   if (msg.timestamp) {

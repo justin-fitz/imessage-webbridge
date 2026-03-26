@@ -17,3 +17,8 @@ bridge:
 web:
   host: "127.0.0.1"
   port: 8080
+  password: "CHANGE_ME"           # required for internet exposure
+  # allowed_origins:              # restrict WebSocket origins
+  #   - "https://yourdomain.com"
+  max_connections: 20             # max concurrent WebSocket connections
+  max_message_length: 10000       # max characters per message

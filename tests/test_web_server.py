@@ -80,24 +80,29 @@ async def test_web_bridge_forward():
 
 
 @pytest.mark.asyncio
-async def test_web_bridge_forward_with_attachments():
+async def test_web_bridge_forward_with_attachments(tmp_path):
     mgr = ConnectionManager()
     ws = AsyncMock()
     await mgr.connect(ws)
     handler = WebBridge(mgr)
+
+    # Create a real temp file so the attachment passes the exists() check
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"\xff\xd8\xff\xe0")
 
     from models import BridgeAttachment
     msg = BridgeMessage(
         rowid=2, text=None, is_from_me=True, sender_id="me",
         chat_identifier="chat123", chat_display_name="Group",
         chat_style=43, timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        attachments=[BridgeAttachment("/tmp/photo.jpg", "image/jpeg", "photo.jpg", 1024)],
+        attachments=[BridgeAttachment(str(photo), "image/jpeg", "photo.jpg", 1024)],
     )
     await handler.forward_to_output(msg)
 
     sent = json.loads(ws.send_text.call_args[0][0])
     assert len(sent["attachments"]) == 1
     assert sent["attachments"][0]["transfer_name"] == "photo.jpg"
+    assert sent["attachments"][0]["url"].startswith("/api/attachments/")
 
 
 # --- Database query tests ---
