@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from web_server import ConnectionManager, WebHandler, get_chat_messages, get_recent_chats
+from web_server import ConnectionManager, ContactStore, WebHandler, get_chat_messages, get_recent_chats
 from imessage_reader import APPLE_EPOCH_OFFSET
 from models import ChatMessage
 
@@ -182,3 +182,58 @@ def test_get_recent_chats_limit(tmp_path):
     db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
     chats = get_recent_chats(db_path, {}, limit=1)
     assert len(chats) == 1
+
+
+def test_get_chat_messages_with_offset(tmp_path):
+    db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+    first = get_chat_messages(db_path, "+15551234567", {}, limit=2, offset=0)
+    assert len(first) == 2
+    second = get_chat_messages(db_path, "+15551234567", {}, limit=2, offset=2)
+    assert len(second) == 1
+    # No overlap
+    assert first[0]["text"] != second[0]["text"]
+
+
+def test_contact_store_sync():
+    """ContactStore loads contacts and tracks sync metadata."""
+    store = ContactStore()
+    assert store.count >= 0
+    assert store.last_sync != ""
+    old_sync = store.last_sync
+    import time
+    time.sleep(0.01)
+    store.sync()
+    # Sync time should update
+    assert store.last_sync >= old_sync
+    assert store.count == len(store.contacts)
+
+
+def test_create_app_endpoints_use_contact_store(tmp_path):
+    """Verify the app wires contact_store correctly by calling the messages API."""
+    from unittest.mock import patch
+    from app_core import AppCore
+    from config import Config, IMessageConfig, AppConfig, WebConfig
+
+    # Create a test chat.db
+    db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+
+    config = Config(
+        imessage=IMessageConfig(db_path=db_path),
+        app=AppConfig(state_db=str(tmp_path / "state.db"), temp_dir=str(tmp_path / "tmp")),
+        web=WebConfig(),
+    )
+    with patch("app_core.IMessageReader"):
+        core = AppCore(config)
+
+    from web_server import create_app
+    app = create_app(core)
+
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+
+    # Messages endpoint should work (no NameError on contacts)
+    resp = client.get("/api/chats/%2B15551234567/messages")
+    assert resp.status_code == 200
+    messages = resp.json()
+    assert len(messages) == 3
+    assert messages[0]["text"] == "msg 1"
