@@ -43,37 +43,71 @@ Open http://127.0.0.1:8080 in your browser. Log in with your password, and you'l
 
 ## Features
 
+### Messaging
 - **Real-time messages** via WebSocket — new messages appear instantly
-- **Contact names** resolved from macOS AddressBook
-- **Group chats** show member names
-- **Inline images/videos** with automatic HEIC-to-JPEG conversion
+- **Send and receive** iMessages from the web UI
+- **Infinite scroll** to load older messages (100 at a time)
+- **Attachments** — images, videos, and files forwarded in both directions
+- **Inline images/videos** displayed in chat with automatic HEIC-to-JPEG conversion for iPhone photos
 - **Tapback reactions** (❤️ 👍 👎 😂 ‼️ ❓) displayed on messages
-- **Delivery/Read status** on sent messages, updated in real time
-- **Unread badges** on sidebar chats with count
-- **Infinite scroll** to load older messages
-- **Attachments** forwarded in both directions
-- **Authentication** with cookie-based sessions
-- **Input validation** — messages only sent to known conversations
+
+### Contacts & Conversations
+- **Contact names** resolved from macOS AddressBook — shows names instead of phone numbers
+- **Group chats** show member names when no group name is set
+- **Contact sync** — resync contacts from the Preferences panel without restarting
+
+### Status & Notifications
+- **Delivery/Read status** on sent messages (Sent → Delivered → Read), updated in real time
+- **Unread badges** — blue dot with count on sidebar chats, clears when you open the chat
+- **Tab title notifications** — unread count in the tab title (e.g. `(3) iMessage Web Gateway`) and flashing tab title with sender name when new messages arrive on an inactive tab
+- **Desktop notifications** — native browser notifications with sender name and message preview (opt-in via Preferences)
+- **Notification sound** — toggleable sound with desktop notifications
+
+### Preferences
+Access via the **Preferences** link at the bottom of the sidebar:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Flash tab title | On | Flash the browser tab with sender name when new messages arrive while tab is inactive |
+| Desktop notifications | Off | Show native browser notifications for new messages (prompts for permission when enabled) |
+| Notification sound | On | Play a sound with desktop notifications |
+| Contacts | — | Shows contact count and last sync time, with a **Sync** button to reload contacts from AddressBook |
+
+Preferences are saved in your browser's localStorage and persist across sessions.
+
+### Security
+- **Cookie-based authentication** with configurable password and 7-day sessions
+- **WebSocket authentication** via session token
+- **JXA message sending** — uses JavaScript for Automation with `json.dumps()` parameterization to prevent command injection
+- **Input validation** — messages only sent to known conversations in chat.db
+- **Chat identifier validation** — regex allowlist blocks malformed identifiers
+- **Attachment tokens** — cryptographic random tokens with 1-hour TTL, auto-pruned
+- **Connection limits** — configurable max WebSocket connections (default 20)
+- **Message length cap** — configurable maximum (default 10,000 characters)
+- **Origin checking** — optional WebSocket origin allowlist
 
 ## Configuration
 
 ```yaml
 imessage:
   db_path: "~/Library/Messages/chat.db"
-  poll_interval_seconds: 2
+  attachments_path: "~/Library/Messages/Attachments/"
+  poll_interval_seconds: 2          # how often to check for new messages
 
 app:
-  allowed_chats: []              # empty = all chats forwarded
-  # allowed_chats:
-  #   - "+15551234567"           # only forward specific conversations
+  allowed_chats: []                  # empty = all chats
+  # allowed_chats:                   # restrict to specific conversations
+  #   - "+15551234567"
+  state_db: "db/bridge.db"          # internal state database
+  temp_dir: "tmp/"                   # temp files for HEIC conversion, etc.
 
 web:
-  host: "127.0.0.1"             # use "0.0.0.0" for network access
+  host: "127.0.0.1"                 # use "0.0.0.0" for network access
   port: 8080
-  password: "CHANGE_ME"         # required for internet exposure
-  max_connections: 20            # max concurrent WebSocket connections
-  max_message_length: 10000     # max characters per message
-  # allowed_origins:            # restrict WebSocket origins
+  password: "CHANGE_ME"             # required for internet exposure
+  max_connections: 20                # max concurrent WebSocket connections
+  max_message_length: 10000         # max characters per message
+  # allowed_origins:                # restrict WebSocket origins
   #   - "https://yourdomain.com"
 ```
 
@@ -107,7 +141,7 @@ Load with: `launchctl load ~/Library/LaunchAgents/com.imessage-webbridge.plist`
 
 ## HTTPS with Caddy
 
-For TLS, use Caddy as a reverse proxy:
+For TLS, use Caddy as a reverse proxy with a self-signed certificate:
 
 ```
 :8081 {
@@ -116,6 +150,20 @@ For TLS, use Caddy as a reverse proxy:
 }
 ```
 
+Generate a self-signed cert:
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes \
+  -subj "/CN=yourdomain.com" -addext "subjectAltName=DNS:yourdomain.com"
+```
+
+Install and start Caddy:
+```bash
+brew install caddy
+brew services start caddy
+```
+
+Forward the HTTPS port (e.g. 8081) on your router. The browser will show a certificate warning on first visit for self-signed certs.
+
 ## Notes
 
 - Your Mac must stay awake and logged in. Use `caffeinate -d` or disable sleep.
@@ -123,6 +171,7 @@ For TLS, use Caddy as a reverse proxy:
 - The first run starts from the current point in time — no backfill of old messages.
 - The web UI loads chat history when you select a conversation, with infinite scroll for older messages.
 - Sending messages uses JXA (JavaScript for Automation) with parameterized inputs to prevent injection.
+- Sending tapback reactions is not supported — Apple does not expose this via any public scripting API.
 
 ## Tests
 
@@ -130,3 +179,5 @@ For TLS, use Caddy as a reverse proxy:
 source venv/bin/activate
 python -m pytest tests/ -v
 ```
+
+71 tests covering config loading, message reading, message sending, contact resolution, channel mapping, WebSocket management, delivery status, pagination, and full app integration.
