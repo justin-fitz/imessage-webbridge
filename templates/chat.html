@@ -706,7 +706,7 @@ function createMessageElement(msg, showAvatar) {
     : '';
 
   if (msg.text) {
-    html += `<div class="msg-row"><span class="msg-body">${escapeHtml(msg.text)}</span>${timeHtml}</div>`;
+    html += `<div class="msg-row"><span class="msg-body">${linkify(escapeHtml(msg.text))}</span>${timeHtml}</div>`;
   } else if (timeHtml) {
     html += `<div class="msg-row">${timeHtml}</div>`;
   }
@@ -811,6 +811,10 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+function linkify(html) {
+  return html.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">$1</a>');
 }
 
 // --- Infinite scroll ---
