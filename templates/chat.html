@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>iMessage WebBridge</title>
+<title>iMessage Web Gateway</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -260,6 +260,102 @@
     font-size: 16px;
   }
 
+  /* Preferences panel */
+  #prefs-btn {
+    padding: 8px 16px;
+    font-size: 12px;
+    color: #666;
+    cursor: pointer;
+    border-top: 1px solid #333;
+    text-align: center;
+  }
+
+  #prefs-btn:hover { color: #aaa; }
+
+  #prefs-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #prefs-overlay.open { display: flex; }
+
+  #prefs-panel {
+    background: #222;
+    border-radius: 12px;
+    padding: 24px;
+    width: 320px;
+    max-width: 90vw;
+  }
+
+  #prefs-panel h3 { margin: 0 0 16px; font-size: 16px; }
+
+  .pref-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid #333;
+    font-size: 13px;
+  }
+
+  .pref-row:last-child { border-bottom: none; }
+
+  .pref-label { flex: 1; }
+  .pref-desc { font-size: 11px; color: #888; margin-top: 2px; }
+
+  .toggle {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    flex-shrink: 0;
+    margin-left: 12px;
+  }
+
+  .toggle input { opacity: 0; width: 0; height: 0; }
+
+  .toggle .slider {
+    position: absolute;
+    inset: 0;
+    background: #444;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .toggle .slider::before {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    left: 3px;
+    top: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.2s;
+  }
+
+  .toggle input:checked + .slider { background: #0b84fe; }
+  .toggle input:checked + .slider::before { transform: translateX(20px); }
+
+  #prefs-close {
+    margin-top: 16px;
+    width: 100%;
+    padding: 8px;
+    background: #333;
+    color: #e0e0e0;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  #prefs-close:hover { background: #444; }
+
   /* Status indicator */
   #status {
     padding: 8px 16px;
@@ -305,7 +401,36 @@
     </div>
     {% endfor %}
   </div>
+  <div id="prefs-btn">Preferences</div>
   <div id="status"><span class="dot disconnected" id="status-dot"></span><span id="status-text">Connecting...</span></div>
+</div>
+
+<div id="prefs-overlay">
+  <div id="prefs-panel">
+    <h3>Preferences</h3>
+    <div class="pref-row">
+      <div>
+        <div class="pref-label">Flash tab title</div>
+        <div class="pref-desc">Flash the browser tab when new messages arrive</div>
+      </div>
+      <label class="toggle"><input type="checkbox" id="pref-flash" checked><span class="slider"></span></label>
+    </div>
+    <div class="pref-row">
+      <div>
+        <div class="pref-label">Desktop notifications</div>
+        <div class="pref-desc">Show browser notifications for new messages</div>
+      </div>
+      <label class="toggle"><input type="checkbox" id="pref-notify"><span class="slider"></span></label>
+    </div>
+    <div class="pref-row">
+      <div>
+        <div class="pref-label">Notification sound</div>
+        <div class="pref-desc">Play a sound with notifications</div>
+      </div>
+      <label class="toggle"><input type="checkbox" id="pref-sound" checked><span class="slider"></span></label>
+    </div>
+    <button id="prefs-close">Done</button>
+  </div>
 </div>
 
 <div id="main">
@@ -363,6 +488,13 @@ function connectWS() {
         state.unread[cid] = (state.unread[cid] || 0) + 1;
         updateUnreadBadge(cid);
         updateTitle();
+
+        // Notifications for messages not in current view
+        const senderName = data.sender_id || data.chat_display_name || cid;
+        showNotification(senderName, data.text);
+        if (document.hidden) {
+          startFlash(`New message from ${senderName}`);
+        }
       }
       updateSidebarPreview(data);
     } else if (data.type === 'status_update') {
@@ -398,7 +530,9 @@ function updateUnreadBadge(chatId) {
 
 function updateTitle() {
   const total = Object.values(state.unread).reduce((a, b) => a + b, 0);
-  document.title = total > 0 ? `(${total}) iMessage WebBridge` : 'iMessage WebBridge';
+  const base = 'iMessage Web Gateway';
+  document.title = total > 0 ? `(${total}) ${base}` : base;
+  originalTitle = document.title;
 }
 
 // --- Chat selection ---
@@ -604,6 +738,107 @@ document.getElementById('messages').addEventListener('scroll', async function() 
   showLastStatus();
   state.loadingMore = false;
 });
+
+// --- Preferences ---
+const prefs = {
+  flash: true,
+  notify: false,
+  sound: true,
+};
+
+function loadPrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('imsg-prefs'));
+    if (saved) Object.assign(prefs, saved);
+  } catch {}
+  document.getElementById('pref-flash').checked = prefs.flash;
+  document.getElementById('pref-notify').checked = prefs.notify;
+  document.getElementById('pref-sound').checked = prefs.sound;
+}
+
+function savePrefs() {
+  prefs.flash = document.getElementById('pref-flash').checked;
+  prefs.notify = document.getElementById('pref-notify').checked;
+  prefs.sound = document.getElementById('pref-sound').checked;
+  localStorage.setItem('imsg-prefs', JSON.stringify(prefs));
+}
+
+document.getElementById('prefs-btn').addEventListener('click', () => {
+  document.getElementById('prefs-overlay').classList.add('open');
+});
+
+document.getElementById('prefs-close').addEventListener('click', () => {
+  savePrefs();
+  document.getElementById('prefs-overlay').classList.remove('open');
+});
+
+document.getElementById('prefs-overlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) {
+    savePrefs();
+    e.currentTarget.classList.remove('open');
+  }
+});
+
+// Request notification permission when toggled on
+document.getElementById('pref-notify').addEventListener('change', async (e) => {
+  if (e.target.checked && Notification.permission === 'default') {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') {
+      e.target.checked = false;
+    }
+  } else if (e.target.checked && Notification.permission === 'denied') {
+    e.target.checked = false;
+    alert('Notifications are blocked. Enable them in your browser settings for this site.');
+  }
+  savePrefs();
+});
+
+loadPrefs();
+
+// --- Tab flash ---
+let flashInterval = null;
+let originalTitle = 'iMessage Web Gateway';
+
+function startFlash(text) {
+  if (!prefs.flash) return;
+  stopFlash();
+  let show = true;
+  flashInterval = setInterval(() => {
+    document.title = show ? text : originalTitle;
+    show = !show;
+  }, 1000);
+}
+
+function stopFlash() {
+  if (flashInterval) {
+    clearInterval(flashInterval);
+    flashInterval = null;
+  }
+  updateTitle();
+}
+
+// Stop flashing when tab gets focus
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) stopFlash();
+});
+window.addEventListener('focus', stopFlash);
+
+// --- Browser notifications ---
+function showNotification(senderName, text) {
+  if (!prefs.notify || Notification.permission !== 'granted') return;
+  const body = text || '(attachment)';
+  const n = new Notification(senderName, {
+    body: body.substring(0, 200),
+    icon: '',
+    tag: 'imsg-' + Date.now(),
+    silent: !prefs.sound,
+  });
+  n.onclick = () => {
+    window.focus();
+    n.close();
+  };
+  setTimeout(() => n.close(), 8000);
+}
 
 // --- Init ---
 connectWS();
