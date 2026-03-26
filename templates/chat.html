@@ -114,16 +114,27 @@
     padding: 16px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 3px;
   }
 
   .msg {
     max-width: 70%;
-    padding: 8px 12px;
+    padding: 6px 10px;
     border-radius: 16px;
     font-size: 14px;
     line-height: 1.4;
     word-wrap: break-word;
+  }
+
+  .msg-body {
+    display: inline;
+  }
+
+  .msg-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
   }
 
   .msg.from-me {
@@ -149,7 +160,8 @@
   .msg-time {
     font-size: 10px;
     color: #777;
-    margin-top: 2px;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .msg.from-me .msg-time { color: rgba(255,255,255,0.6); }
@@ -625,8 +637,14 @@ function createMessageElement(msg) {
     html += `<div class="msg-sender">${escapeHtml(msg.sender_id)}</div>`;
   }
 
+  const timeHtml = msg.timestamp
+    ? `<span class="msg-time">${new Date(msg.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>`
+    : '';
+
   if (msg.text) {
-    html += escapeHtml(msg.text);
+    html += `<div class="msg-row"><span class="msg-body">${escapeHtml(msg.text)}</span>${timeHtml}</div>`;
+  } else if (timeHtml) {
+    html += `<div class="msg-row">${timeHtml}</div>`;
   }
 
   if (msg.attachments && msg.attachments.length) {
@@ -641,12 +659,6 @@ function createMessageElement(msg) {
         html += `<a class="msg-file" href="${att.url}" target="_blank" download>${escapeHtml(att.transfer_name)}</a>`;
       }
     }
-  }
-
-  if (msg.timestamp) {
-    const d = new Date(msg.timestamp);
-    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    html += `<div class="msg-time">${time}</div>`;
   }
 
   if (msg.reactions && msg.reactions.length) {
