@@ -33,25 +33,44 @@ def _sanitize(obj):
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-# Session tokens: token -> expiry timestamp
-_sessions: dict[str, float] = {}
-_SESSION_TTL = 86400 * 7  # 7 days
+_SESSION_TTL = 86400  # 24 hours
+_session_db: sqlite3.Connection | None = None
+
+
+def _init_session_db(db_path: str):
+    global _session_db
+    _session_db = sqlite3.connect(db_path)
+    _session_db.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            expiry REAL NOT NULL
+        )
+    """)
+    _session_db.execute("DELETE FROM sessions WHERE expiry < ?", (time.time(),))
+    _session_db.commit()
 
 
 def _create_session() -> str:
     token = secrets.token_urlsafe(32)
-    _sessions[token] = time.time() + _SESSION_TTL
+    _session_db.execute(
+        "INSERT INTO sessions (token, expiry) VALUES (?, ?)",
+        (token, time.time() + _SESSION_TTL),
+    )
+    _session_db.commit()
     return token
 
 
 def _valid_session(token: str | None) -> bool:
-    if not token:
+    if not token or not _session_db:
         return False
-    expiry = _sessions.get(token)
-    if not expiry:
+    row = _session_db.execute(
+        "SELECT expiry FROM sessions WHERE token = ?", (token,)
+    ).fetchone()
+    if not row:
         return False
-    if time.time() > expiry:
-        del _sessions[token]
+    if time.time() > row[0]:
+        _session_db.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        _session_db.commit()
         return False
     return True
 
@@ -456,6 +475,7 @@ class ContactStore:
 def create_app(core: AppCore) -> FastAPI:
     app = FastAPI()
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+    _init_session_db(core.config.app.state_db)
     manager = ConnectionManager(max_connections=core.config.web.max_connections)
     contact_store = ContactStore()
     web_handler = WebHandler(manager, contact_store.contacts)
