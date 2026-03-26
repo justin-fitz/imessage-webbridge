@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>iMessage Web Gateway</title>
 <link rel="icon" type="image/svg+xml" href="/static/logo2.svg">
+<link rel="manifest" href="/static/manifest.json">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -995,6 +996,11 @@ function showNotification(senderName, text) {
     n.close();
   };
   setTimeout(() => n.close(), 8000);
+}
+
+// --- Service Worker ---
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/static/sw.js');
 }
 
 // --- Init ---

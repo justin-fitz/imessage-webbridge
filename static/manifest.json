@@ -1,0 +1,16 @@
+{
+  "name": "iMessage Web Bridge",
+  "short_name": "iMessage",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a1a",
+  "theme_color": "#5856D6",
+  "icons": [
+    {
+      "src": "/static/logo2.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

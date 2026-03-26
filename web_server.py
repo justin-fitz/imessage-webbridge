@@ -436,6 +436,7 @@ LOGIN_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>iMessage Web Gateway - Login</title>
 <link rel="icon" type="image/svg+xml" href="/static/logo2.svg">
+<link rel="manifest" href="/static/manifest.json">
 <style>
   body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #e0e0e0;
          display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
