@@ -113,9 +113,10 @@ def _create_test_chatdb(path):
         CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
         CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT, style INTEGER);
         CREATE TABLE message (
-            ROWID INTEGER PRIMARY KEY, text TEXT, is_from_me INTEGER DEFAULT 0,
+            ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, is_from_me INTEGER DEFAULT 0,
             date INTEGER, handle_id INTEGER, cache_has_attachments INTEGER DEFAULT 0,
             item_type INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
+            associated_message_guid TEXT,
             attributedBody BLOB, date_delivered INTEGER DEFAULT 0, date_read INTEGER DEFAULT 0
         );
         CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
@@ -128,18 +129,18 @@ def _create_test_chatdb(path):
     apple_ns = (1704067200 - APPLE_EPOCH_OFFSET) * 1_000_000_000
     for i in range(1, 4):
         conn.execute(
-            "INSERT INTO message (ROWID, text, is_from_me, date, handle_id, item_type, associated_message_type) "
-            "VALUES (?, ?, ?, ?, 1, 0, 0)",
-            (i, f"msg {i}", i % 2, apple_ns + i * 1_000_000_000),
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, associated_message_type) "
+            "VALUES (?, ?, ?, ?, ?, 1, 0, 0)",
+            (i, f"guid-{i}", f"msg {i}", i % 2, apple_ns + i * 1_000_000_000),
         )
         conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, ?)", (i,))
 
     # Insert messages for chat 2
     for i in range(4, 6):
         conn.execute(
-            "INSERT INTO message (ROWID, text, is_from_me, date, handle_id, item_type, associated_message_type) "
-            "VALUES (?, ?, 0, ?, 1, 0, 0)",
-            (i, f"group msg {i}", apple_ns + i * 1_000_000_000),
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, associated_message_type) "
+            "VALUES (?, ?, ?, 0, ?, 1, 0, 0)",
+            (i, f"guid-{i}", f"group msg {i}", apple_ns + i * 1_000_000_000),
         )
         conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (2, ?)", (i,))
 

@@ -220,6 +220,38 @@ def _prune_attachments():
         del _attachment_registry[k]
 
 
+_TAPBACK_MAP = {
+    2000: "\u2764\ufe0f", 2001: "\ud83d\udc4d", 2002: "\ud83d\udc4e",
+    2003: "\ud83d\ude02", 2004: "\u203c\ufe0f", 2005: "\u2753",
+}
+
+
+def _get_reactions_for_messages(conn, chat_identifier: str) -> dict[str, list[dict]]:
+    """Load all reactions for a chat, keyed by target message guid."""
+    rows = conn.execute("""
+        SELECT m.associated_message_type, m.associated_message_guid, m.is_from_me
+        FROM message m
+        JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+        JOIN chat c ON cmj.chat_id = c.ROWID
+        WHERE c.chat_identifier = ?
+          AND m.associated_message_type BETWEEN 2000 AND 2006
+    """, (chat_identifier,)).fetchall()
+
+    reactions: dict[str, list[dict]] = {}
+    for row in rows:
+        guid = row["associated_message_guid"]
+        msg_guid = guid.split("/")[-1] if "/" in guid else guid
+        rtype = row["associated_message_type"]
+        emoji = _TAPBACK_MAP.get(rtype, "")
+        if not emoji:
+            continue
+        reactions.setdefault(msg_guid, []).append({
+            "emoji": emoji,
+            "is_from_me": bool(row["is_from_me"]),
+        })
+    return reactions
+
+
 def _get_attachments_for_message(conn, message_rowid: int) -> list[dict]:
     rows = conn.execute("""
         SELECT a.filename, a.mime_type, a.transfer_name, a.total_bytes
@@ -255,7 +287,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
-        SELECT m.ROWID, m.text, m.is_from_me, m.date, m.attributedBody,
+        SELECT m.ROWID, m.guid, m.text, m.is_from_me, m.date, m.attributedBody,
                m.cache_has_attachments,
                m.date_delivered, m.date_read, h.id as sender_id
         FROM message m
@@ -270,6 +302,8 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
     """, (chat_identifier, limit, offset)).fetchall()
 
     from imessage_reader import IMessageReader
+
+    reactions = _get_reactions_for_messages(conn, chat_identifier)
 
     messages = []
     for row in reversed(rows):
@@ -302,6 +336,8 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
             else:
                 status = "sent"
 
+        msg_reactions = reactions.get(row["guid"], [])
+
         messages.append({
             "text": text,
             "is_from_me": bool(row["is_from_me"]),
@@ -309,6 +345,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
             "timestamp": ts,
             "status": status,
             "attachments": attachments,
+            "reactions": msg_reactions,
         })
 
     conn.close()

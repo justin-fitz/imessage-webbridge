@@ -186,6 +186,35 @@
   .msg-file:hover { background: rgba(255,255,255,0.15); }
   .msg.from-me .msg-file { background: rgba(0,0,0,0.15); color: rgba(255,255,255,0.8); }
 
+  .msg-reactions {
+    display: flex;
+    gap: 2px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+  }
+
+  .msg-reactions .reaction {
+    display: inline-flex;
+    align-items: center;
+    background: #333;
+    border: 1px solid #444;
+    border-radius: 12px;
+    padding: 1px 6px;
+    font-size: 12px;
+    line-height: 18px;
+  }
+
+  .msg.from-me .msg-reactions .reaction {
+    background: rgba(0,0,0,0.2);
+    border-color: rgba(255,255,255,0.15);
+  }
+
+  .reaction .count {
+    font-size: 10px;
+    margin-left: 2px;
+    color: #999;
+  }
+
   /* Compose */
   #compose {
     padding: 12px 16px;
@@ -475,6 +504,17 @@ function createMessageElement(msg) {
     const d = new Date(msg.timestamp);
     const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     html += `<div class="msg-time">${time}</div>`;
+  }
+
+  if (msg.reactions && msg.reactions.length) {
+    // Group reactions by emoji and count
+    const counts = {};
+    msg.reactions.forEach(r => { counts[r.emoji] = (counts[r.emoji] || 0) + 1; });
+    html += '<div class="msg-reactions">';
+    for (const [emoji, count] of Object.entries(counts)) {
+      html += `<span class="reaction">${emoji}${count > 1 ? `<span class="count">${count}</span>` : ''}</span>`;
+    }
+    html += '</div>';
   }
 
   if (msg.is_from_me && msg.status) {
