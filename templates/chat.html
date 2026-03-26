@@ -429,6 +429,15 @@
       </div>
       <label class="toggle"><input type="checkbox" id="pref-sound" checked><span class="slider"></span></label>
     </div>
+    <div class="pref-row" style="flex-direction:column;align-items:stretch">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div class="pref-label">Contacts</div>
+          <div class="pref-desc" id="contacts-status">Loading...</div>
+        </div>
+        <button id="sync-contacts-btn" style="padding:6px 14px;background:#0b84fe;color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;flex-shrink:0;margin-left:12px">Sync</button>
+      </div>
+    </div>
     <button id="prefs-close">Done</button>
   </div>
 </div>
@@ -794,6 +803,36 @@ document.getElementById('pref-notify').addEventListener('change', async (e) => {
 });
 
 loadPrefs();
+
+// --- Contacts sync ---
+async function loadContactsStatus() {
+  try {
+    const resp = await fetch('/api/contacts/status');
+    if (resp.ok) {
+      const data = await resp.json();
+      document.getElementById('contacts-status').textContent =
+        `${data.count} contacts — last sync ${data.last_sync}`;
+    }
+  } catch {}
+}
+
+document.getElementById('sync-contacts-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('sync-contacts-btn');
+  btn.disabled = true;
+  btn.textContent = 'Syncing...';
+  try {
+    const resp = await fetch('/api/contacts/sync', { method: 'POST' });
+    if (resp.ok) {
+      const data = await resp.json();
+      document.getElementById('contacts-status').textContent =
+        `${data.count} contacts — last sync ${data.last_sync}`;
+    }
+  } catch {}
+  btn.disabled = false;
+  btn.textContent = 'Sync';
+});
+
+loadContactsStatus();
 
 // --- Tab flash ---
 let flashInterval = null;

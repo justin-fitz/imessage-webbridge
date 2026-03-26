@@ -392,14 +392,27 @@ LOGIN_HTML = """<!DOCTYPE html>
 </body></html>"""
 
 
+class ContactStore:
+    def __init__(self):
+        self.contacts: dict[str, str] = {}
+        self.count: int = 0
+        self.last_sync: str = ""
+        self.sync()
+
+    def sync(self):
+        self.contacts = load_contacts()
+        self.count = len(self.contacts)
+        self.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"Loaded {self.count} contacts from AddressBook")
+
+
 def create_app(core: AppCore) -> FastAPI:
     app = FastAPI()
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
     manager = ConnectionManager(max_connections=core.config.web.max_connections)
-    contacts = load_contacts()
-    web_handler = WebHandler(manager, contacts)
+    contact_store = ContactStore()
+    web_handler = WebHandler(manager, contact_store.contacts)
     core.add_handler(web_handler)
-    print(f"Loaded {len(contacts)} contacts from AddressBook")
 
     status_poller = StatusPoller(core.config.imessage.db_path, manager)
     known_chats = _get_known_chat_identifiers(core.config.imessage.db_path)
@@ -446,14 +459,28 @@ def create_app(core: AppCore) -> FastAPI:
     async def index(request: Request, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             return RedirectResponse("/login", status_code=303)
-        chats = get_recent_chats(core.config.imessage.db_path, contacts)
+        chats = get_recent_chats(core.config.imessage.db_path, contact_store.contacts)
         return templates.TemplateResponse(request, "chat.html", {"chats": chats, "ws_token": session or ""})
 
     @app.get("/api/chats")
     async def api_chats(session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
-        return get_recent_chats(core.config.imessage.db_path, contacts)
+        return get_recent_chats(core.config.imessage.db_path, contact_store.contacts)
+
+    @app.post("/api/contacts/sync")
+    async def sync_contacts(session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        contact_store.sync()
+        web_handler.contacts = contact_store.contacts
+        return {"count": contact_store.count, "last_sync": contact_store.last_sync}
+
+    @app.get("/api/contacts/status")
+    async def contacts_status(session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        return {"count": contact_store.count, "last_sync": contact_store.last_sync}
 
     @app.get("/api/chats/{chat_identifier:path}/messages")
     async def api_messages(chat_identifier: str, offset: int = 0, limit: int = 100, session: str | None = Cookie(default=None, alias="session")):
