@@ -151,6 +151,36 @@
     border-bottom-left-radius: 4px;
   }
 
+  .msg-group-wrap {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    align-self: flex-start;
+    max-width: 70%;
+  }
+
+  .msg-group-wrap .msg {
+    max-width: 100%;
+  }
+
+  .msg-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-bottom: 2px;
+  }
+
+  .msg-avatar.hidden {
+    visibility: hidden;
+  }
+
   .msg-sender {
     font-size: 11px;
     color: #aaa;
@@ -593,7 +623,18 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   if (messages.length < 100) state.hasMore = false;
 
   messagesEl.innerHTML = '';
-  messages.forEach(msg => appendMessage(msg));
+  let prevSender = null;
+  messages.forEach(msg => {
+    let showAvatar = true;
+    if (state.chatStyle === 43 && !msg.is_from_me) {
+      if (prevSender === (msg.sender_id || '')) showAvatar = false;
+      prevSender = msg.sender_id || '';
+    } else {
+      prevSender = msg.is_from_me ? '__me__' : null;
+    }
+    const div = createMessageElement(msg, showAvatar);
+    messagesEl.appendChild(div);
+  });
   showLastStatus();
   messagesEl.scrollTop = messagesEl.scrollHeight;
 });
@@ -627,13 +668,36 @@ document.getElementById('msg-input').addEventListener('keydown', (e) => {
 });
 
 // --- Render ---
-function createMessageElement(msg) {
-  const div = document.createElement('div');
-  div.className = `msg ${msg.is_from_me ? 'from-me' : 'from-them'}`;
+const _senderColors = [
+  '#ff6b6b', '#ffa06b', '#ffd93d', '#6bcb77', '#4d96ff',
+  '#9b59b6', '#e84393', '#00b894', '#fd79a8', '#6c5ce7',
+  '#00cec9', '#e17055', '#a29bfe', '#55a3e8', '#ff9ff3',
+];
+
+function senderColor(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  return _senderColors[Math.abs(hash) % _senderColors.length];
+}
+
+function senderInitials(name) {
+  if (!name || name === 'me') return '?';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  return name.substring(0, 2).toUpperCase();
+}
+
+function createMessageElement(msg, showAvatar) {
+  const isGroup = state.chatStyle === 43;
+  const fromThem = !msg.is_from_me;
+
+  const msgDiv = document.createElement('div');
+  msgDiv.className = `msg ${msg.is_from_me ? 'from-me' : 'from-them'}`;
+  if (fromThem && isGroup) msgDiv.dataset.sender = msg.sender_id || '';
 
   let html = '';
 
-  if (!msg.is_from_me && state.chatStyle === 43 && msg.sender_id) {
+  if (fromThem && isGroup && showAvatar && msg.sender_id) {
     html += `<div class="msg-sender">${escapeHtml(msg.sender_id)}</div>`;
   }
 
@@ -680,13 +744,36 @@ function createMessageElement(msg) {
     }
   }
 
-  div.innerHTML = html;
-  return div;
+  msgDiv.innerHTML = html;
+
+  // Wrap in avatar row for group chats (from others only)
+  if (isGroup && fromThem) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-group-wrap';
+    const avatar = document.createElement('div');
+    avatar.className = `msg-avatar${showAvatar ? '' : ' hidden'}`;
+    const name = msg.sender_id || '?';
+    avatar.textContent = senderInitials(name);
+    avatar.style.background = senderColor(name);
+    wrap.appendChild(avatar);
+    wrap.appendChild(msgDiv);
+    return wrap;
+  }
+
+  return msgDiv;
 }
 
 function appendMessage(msg) {
   const messagesEl = document.getElementById('messages');
-  const div = createMessageElement(msg);
+  // Determine if avatar should show (first msg from this sender in a run)
+  const lastEl = messagesEl.lastElementChild;
+  let showAvatar = true;
+  if (lastEl && state.chatStyle === 43 && !msg.is_from_me) {
+    const lastMsg = lastEl.querySelector('.msg[data-sender]') || lastEl;
+    const lastSender = lastMsg.dataset?.sender;
+    if (lastSender === (msg.sender_id || '')) showAvatar = false;
+  }
+  const div = createMessageElement(msg, showAvatar);
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -748,8 +835,16 @@ document.getElementById('messages').addEventListener('scroll', async function() 
 
   // Prepend older messages at the top
   const fragment = document.createDocumentFragment();
+  let prevSender = null;
   older.forEach(msg => {
-    const div = createMessageElement(msg);
+    let showAvatar = true;
+    if (state.chatStyle === 43 && !msg.is_from_me) {
+      if (prevSender === (msg.sender_id || '')) showAvatar = false;
+      prevSender = msg.sender_id || '';
+    } else {
+      prevSender = msg.is_from_me ? '__me__' : null;
+    }
+    const div = createMessageElement(msg, showAvatar);
     fragment.appendChild(div);
   });
   this.insertBefore(fragment, this.firstChild);
