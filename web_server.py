@@ -479,6 +479,13 @@ class ContactStore:
 def create_app(core: AppCore) -> FastAPI:
     app = FastAPI()
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+    _sw_path = os.path.join(BASE_DIR, "static", "sw.js")
+
+    @app.get("/sw.js")
+    async def service_worker():
+        return FileResponse(_sw_path, media_type="application/javascript",
+                            headers={"Service-Worker-Allowed": "/"})
+
     _init_session_db(core.config.app.state_db)
     manager = ConnectionManager(max_connections=core.config.web.max_connections)
     contact_store = ContactStore()
