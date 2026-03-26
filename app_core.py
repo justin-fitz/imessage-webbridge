@@ -52,8 +52,6 @@ class AppCore:
             self._mark_sent(chat_identifier, text, None)
 
     def _should_skip(self, msg: ChatMessage) -> bool:
-        if self.config.app.allowed_chats and msg.chat_identifier not in self.config.app.allowed_chats:
-            return True
         if msg.is_from_me and self._was_recently_sent(msg):
             return True
         return False

@@ -95,33 +95,6 @@ class TestDedup:
 
 
 class TestShouldSkip:
-    def test_allowed_chats_filter(self, tmp_path):
-        config = _make_config(tmp_path)
-        config.app.allowed_chats = ["+15559999999"]
-        with patch("app_core.IMessageReader"):
-            core = AppCore(config)
-
-        msg = _make_msg(chat_identifier="+15551234567")
-        assert core._should_skip(msg) is True
-
-    def test_allowed_chats_passes(self, tmp_path):
-        config = _make_config(tmp_path)
-        config.app.allowed_chats = ["+15551234567"]
-        with patch("app_core.IMessageReader"):
-            core = AppCore(config)
-
-        msg = _make_msg(chat_identifier="+15551234567")
-        assert core._should_skip(msg) is False
-
-    def test_empty_allowlist_passes_all(self, tmp_path):
-        config = _make_config(tmp_path)
-        config.app.allowed_chats = []
-        with patch("app_core.IMessageReader"):
-            core = AppCore(config)
-
-        msg = _make_msg(chat_identifier="anything")
-        assert core._should_skip(msg) is False
-
     def test_from_me_recently_sent_skipped(self, tmp_path):
         config = _make_config(tmp_path)
         with patch("app_core.IMessageReader"):

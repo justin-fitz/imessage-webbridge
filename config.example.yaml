@@ -4,7 +4,6 @@ imessage:
   poll_interval_seconds: 2
 
 app:
-  allowed_chats: []  # empty = all chats
   state_db: "db/bridge.db"
   temp_dir: "tmp/"
 

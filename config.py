@@ -23,7 +23,6 @@ class IMessageConfig:
 
 @dataclass
 class AppConfig:
-    allowed_chats: list[str] = field(default_factory=list)
     state_db: str = "db/bridge.db"
     temp_dir: str = "tmp/"
 
@@ -48,7 +47,6 @@ def load_config(path: str) -> Config:
 
     br = raw.get("app", {})
     app_cfg = AppConfig(
-        allowed_chats=br.get("allowed_chats", []),
         state_db=br.get("state_db", "db/bridge.db"),
         temp_dir=br.get("temp_dir", "tmp/"),
     )
