@@ -355,7 +355,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
 LOGIN_HTML = """<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>iMessage Bridge - Login</title>
+<title>iMessage WebBridge - Login</title>
 <style>
   body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #e0e0e0;
          display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
@@ -371,7 +371,7 @@ LOGIN_HTML = """<!DOCTYPE html>
 </style>
 </head><body>
 <form method="POST" action="/login">
-  <h2>iMessage Bridge</h2>
+  <h2>iMessage WebBridge</h2>
   <input type="password" name="password" placeholder="Password" autofocus>
   <button type="submit">Login</button>
   {error}

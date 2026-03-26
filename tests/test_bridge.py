@@ -5,13 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bridge import Bridge
-from config import BridgeConfig, Config, DiscordConfig, IMessageConfig, WebConfig
+from config import BridgeConfig, Config, IMessageConfig, WebConfig
 from models import BridgeAttachment, BridgeMessage
 
 
 def _make_config(tmp_path):
     return Config(
-        discord=DiscordConfig(bot_token="fake", guild_id=1),
         imessage=IMessageConfig(
             db_path=str(tmp_path / "chat.db"),
             poll_interval_seconds=1,

@@ -5,13 +5,6 @@ import yaml
 
 
 @dataclass
-class DiscordConfig:
-    bot_token: str
-    guild_id: int
-    category_name: str = "iMessage"
-
-
-@dataclass
 class WebConfig:
     host: str = "127.0.0.1"
     port: int = 8080
@@ -37,7 +30,6 @@ class BridgeConfig:
 
 @dataclass
 class Config:
-    discord: DiscordConfig | None
     imessage: IMessageConfig
     bridge: BridgeConfig
     web: WebConfig
@@ -46,14 +38,6 @@ class Config:
 def load_config(path: str) -> Config:
     with open(path) as f:
         raw = yaml.safe_load(f)
-
-    discord_cfg = None
-    if "discord" in raw and raw["discord"].get("bot_token"):
-        discord_cfg = DiscordConfig(
-            bot_token=raw["discord"]["bot_token"],
-            guild_id=int(raw["discord"]["guild_id"]),
-            category_name=raw["discord"].get("category_name", "iMessage"),
-        )
 
     im = raw.get("imessage", {})
     imessage_cfg = IMessageConfig(
@@ -79,4 +63,4 @@ def load_config(path: str) -> Config:
         max_message_length=w.get("max_message_length", 10000),
     )
 
-    return Config(discord=discord_cfg, imessage=imessage_cfg, bridge=bridge_cfg, web=web_cfg)
+    return Config(imessage=imessage_cfg, bridge=bridge_cfg, web=web_cfg)

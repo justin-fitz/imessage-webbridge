@@ -17,11 +17,6 @@ def config_file(tmp_path):
 
 def test_load_full_config(config_file):
     path = config_file("""
-discord:
-  bot_token: "test-token-123"
-  guild_id: 999888777
-  category_name: "TestCategory"
-
 imessage:
   db_path: "~/Library/Messages/chat.db"
   poll_interval_seconds: 5
@@ -37,9 +32,6 @@ web:
   port: 9090
 """)
     cfg = load_config(path)
-    assert cfg.discord.bot_token == "test-token-123"
-    assert cfg.discord.guild_id == 999888777
-    assert cfg.discord.category_name == "TestCategory"
     assert cfg.imessage.poll_interval_seconds == 5
     assert "~" not in cfg.imessage.db_path  # expanded
     assert cfg.bridge.allowed_chats == ["+15551234567"]
@@ -49,35 +41,18 @@ web:
 
 def test_load_minimal_config(config_file):
     path = config_file("""
-discord:
-  bot_token: "tok"
-  guild_id: 123
+imessage:
+  db_path: "~/Library/Messages/chat.db"
 """)
     cfg = load_config(path)
-    assert cfg.discord.bot_token == "tok"
-    assert cfg.discord.category_name == "iMessage"  # default
     assert cfg.imessage.poll_interval_seconds == 2  # default
     assert cfg.bridge.allowed_chats == []  # default
     assert cfg.web.host == "127.0.0.1"  # default
     assert cfg.web.port == 8080  # default
 
 
-def test_guild_id_coerced_to_int(config_file):
-    path = config_file("""
-discord:
-  bot_token: "tok"
-  guild_id: "456"
-""")
-    cfg = load_config(path)
-    assert cfg.discord.guild_id == 456
-    assert isinstance(cfg.discord.guild_id, int)
-
-
 def test_db_path_expanded(config_file):
     path = config_file("""
-discord:
-  bot_token: "tok"
-  guild_id: 1
 imessage:
   db_path: "~/some/path.db"
 """)
@@ -85,21 +60,13 @@ imessage:
     assert cfg.imessage.db_path == os.path.expanduser("~/some/path.db")
 
 
-def test_discord_optional(config_file):
+def test_defaults_applied(config_file):
     path = config_file("""
-imessage:
-  db_path: "~/Library/Messages/chat.db"
+web:
+  port: 9999
 """)
     cfg = load_config(path)
-    assert cfg.discord is None
-    assert cfg.imessage.db_path == os.path.expanduser("~/Library/Messages/chat.db")
-
-
-def test_discord_none_when_no_token(config_file):
-    path = config_file("""
-discord:
-  bot_token: ""
-  guild_id: 123
-""")
-    cfg = load_config(path)
-    assert cfg.discord is None
+    assert cfg.web.port == 9999
+    assert cfg.web.host == "127.0.0.1"
+    assert cfg.imessage.poll_interval_seconds == 2
+    assert cfg.bridge.allowed_chats == []

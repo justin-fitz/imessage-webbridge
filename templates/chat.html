@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>iMessage Bridge</title>
+<title>iMessage WebBridge</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -398,7 +398,7 @@ function updateUnreadBadge(chatId) {
 
 function updateTitle() {
   const total = Object.values(state.unread).reduce((a, b) => a + b, 0);
-  document.title = total > 0 ? `(${total}) iMessage Bridge` : 'iMessage Bridge';
+  document.title = total > 0 ? `(${total}) iMessage WebBridge` : 'iMessage WebBridge';
 }
 
 // --- Chat selection ---

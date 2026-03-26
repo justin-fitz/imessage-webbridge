@@ -1,9 +1,3 @@
-# Discord config (optional — only needed for discord/both mode)
-# discord:
-#   bot_token: "YOUR_BOT_TOKEN"
-#   guild_id: 123456789
-#   category_name: "iMessage"
-
 imessage:
   db_path: "~/Library/Messages/chat.db"
   attachments_path: "~/Library/Messages/Attachments/"
