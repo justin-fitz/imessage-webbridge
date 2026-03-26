@@ -94,13 +94,6 @@ imessage:
   attachments_path: "~/Library/Messages/Attachments/"
   poll_interval_seconds: 2          # how often to check for new messages
 
-app:
-  allowed_chats: []                  # empty = all chats
-  # allowed_chats:                   # restrict to specific conversations
-  #   - "+15551234567"
-  state_db: "db/bridge.db"          # internal state database
-  temp_dir: "tmp/"                   # temp files for HEIC conversion, etc.
-
 web:
   host: "127.0.0.1"                 # use "0.0.0.0" for network access
   port: 8080
