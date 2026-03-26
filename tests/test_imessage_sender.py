@@ -10,8 +10,11 @@ class TestValidateIdentifier:
     def test_valid_email(self):
         assert _validate_identifier("user@example.com", 45) is True
 
-    def test_valid_group_id(self):
+    def test_valid_group_id_hex(self):
         assert _validate_identifier("d720dea5fcf64c33975a748ef6410622", 43) is True
+
+    def test_valid_group_id_chat_prefix(self):
+        assert _validate_identifier("chat242846992434562406", 43) is True
 
     def test_invalid_injection_buddy(self):
         assert _validate_identifier('" of targetService\ndo shell script "evil', 45) is False
@@ -47,7 +50,7 @@ def test_send_text_group(mock_run):
     result = sender.send_text("abc123def456", 43, "Hi group")
     assert result is True
     script = mock_run.call_args[0][0][2]
-    assert 'chat id "iMessage;+;abc123def456"' in script
+    assert 'chat id "any;+;abc123def456"' in script
     env = mock_run.call_args[1]["env"]
     assert env["IMSG_TEXT"] == "Hi group"
 
@@ -93,7 +96,7 @@ def test_send_file_group(mock_run):
     assert result is True
     script = mock_run.call_args[0][0][2]
     assert 'POSIX file "/tmp/doc.pdf"' in script
-    assert 'chat id "iMessage;+;abc999"' in script
+    assert 'chat id "any;+;abc999"' in script
 
 
 @patch("imessage_sender.subprocess.run")

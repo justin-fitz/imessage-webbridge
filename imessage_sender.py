@@ -5,7 +5,7 @@ import subprocess
 
 # Only allow phone numbers, emails, and iMessage group chat IDs
 _BUDDY_PATTERN = re.compile(r"^[+\d\w@.\-]+$")
-_GROUP_PATTERN = re.compile(r"^[a-f0-9]+$")
+_GROUP_PATTERN = re.compile(r"^(chat)?[a-f0-9]+$")
 
 
 def _validate_identifier(identifier: str, chat_style: int) -> bool:
@@ -53,7 +53,7 @@ end tell
             return self._run_applescript(script)
 
     def _send_to_group(self, chat_identifier: str, text: str | None = None, file_path: str | None = None) -> bool:
-        chat_id = f"iMessage;+;{chat_identifier}"
+        chat_id = f"any;+;{chat_identifier}"
         if text is not None:
             script = """
 tell application "Messages"
