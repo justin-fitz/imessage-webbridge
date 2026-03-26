@@ -237,32 +237,79 @@ _TAPBACK_MAP = {
     2000: "\u2764\ufe0f", 2001: "\ud83d\udc4d", 2002: "\ud83d\udc4e",
     2003: "\ud83d\ude02", 2004: "\u203c\ufe0f", 2005: "\u2753",
 }
+# Types 3000-3005 remove the corresponding 2000-2005 reaction
+_TAPBACK_REMOVE = {3000, 3001, 3002, 3003, 3004, 3005}
+
+import re
+_REACTED_PATTERN = re.compile(r'^Reacted (.+?) to ')
+
+
+def _extract_custom_emoji(text: str | None, attributed_body: bytes | None) -> str | None:
+    """Extract emoji from 'Reacted X to ...' text for type 2006 reactions."""
+    msg = text
+    if not msg and attributed_body:
+        from imessage_reader import IMessageReader
+        msg = IMessageReader._extract_attributed_text(attributed_body)
+    if not msg:
+        return None
+    m = _REACTED_PATTERN.match(msg)
+    return m.group(1) if m else None
 
 
 def _get_reactions_for_messages(conn, chat_identifier: str) -> dict[str, list[dict]]:
     """Load all reactions for a chat, keyed by target message guid."""
     rows = conn.execute("""
-        SELECT m.associated_message_type, m.associated_message_guid, m.is_from_me
+        SELECT m.associated_message_type, m.associated_message_guid,
+               m.is_from_me, m.text, m.attributedBody
         FROM message m
         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
         JOIN chat c ON cmj.chat_id = c.ROWID
         WHERE c.chat_identifier = ?
-          AND m.associated_message_type BETWEEN 2000 AND 2006
+          AND m.associated_message_type >= 2000
     """, (chat_identifier,)).fetchall()
 
+    # Build reactions, then remove any that have a corresponding 3000+ removal
     reactions: dict[str, list[dict]] = {}
+    removals: dict[str, list[dict]] = {}
+
     for row in rows:
         guid = row["associated_message_guid"]
         msg_guid = guid.split("/")[-1] if "/" in guid else guid
         rtype = row["associated_message_type"]
-        emoji = _TAPBACK_MAP.get(rtype, "")
+        is_from_me = bool(row["is_from_me"])
+
+        if rtype in _TAPBACK_REMOVE:
+            # This is a removal of a standard tapback
+            original_type = rtype - 1000
+            emoji = _TAPBACK_MAP.get(original_type, "")
+            if emoji:
+                removals.setdefault(msg_guid, []).append({"emoji": emoji, "is_from_me": is_from_me})
+            continue
+
+        if rtype == 2006:
+            emoji = _extract_custom_emoji(row["text"], row["attributedBody"])
+        else:
+            emoji = _TAPBACK_MAP.get(rtype, "")
+
         if not emoji:
             continue
         reactions.setdefault(msg_guid, []).append({
             "emoji": emoji,
-            "is_from_me": bool(row["is_from_me"]),
+            "is_from_me": is_from_me,
         })
-    return reactions
+
+    # Apply removals
+    for guid, removal_list in removals.items():
+        if guid not in reactions:
+            continue
+        for removal in removal_list:
+            for i, r in enumerate(reactions[guid]):
+                if r["emoji"] == removal["emoji"] and r["is_from_me"] == removal["is_from_me"]:
+                    reactions[guid].pop(i)
+                    break
+
+    # Clean empty entries
+    return {k: v for k, v in reactions.items() if v}
 
 
 def _get_attachments_for_message(conn, message_rowid: int) -> list[dict]:
