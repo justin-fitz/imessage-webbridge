@@ -251,7 +251,7 @@ def _get_known_chat_identifiers(db_path: str) -> set[str]:
     return {row["chat_identifier"] for row in rows}
 
 
-def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, str], limit: int = 100) -> list[dict]:
+def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, str], limit: int = 100, offset: int = 0) -> list[dict]:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
@@ -266,8 +266,8 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
           AND m.item_type = 0
           AND m.associated_message_type = 0
         ORDER BY m.ROWID DESC
-        LIMIT ?
-    """, (chat_identifier, limit)).fetchall()
+        LIMIT ? OFFSET ?
+    """, (chat_identifier, limit, offset)).fetchall()
 
     from imessage_reader import IMessageReader
 
@@ -406,10 +406,11 @@ def create_app(bridge: Bridge) -> FastAPI:
         return get_recent_chats(bridge.config.imessage.db_path, contacts)
 
     @app.get("/api/chats/{chat_identifier:path}/messages")
-    async def api_messages(chat_identifier: str, session: str | None = Cookie(default=None, alias="session")):
+    async def api_messages(chat_identifier: str, offset: int = 0, limit: int = 100, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
-        return get_chat_messages(bridge.config.imessage.db_path, chat_identifier, contacts)
+        limit = min(limit, 200)
+        return get_chat_messages(bridge.config.imessage.db_path, chat_identifier, contacts, limit=limit, offset=offset)
 
     @app.get("/api/attachments/{token}/{filename}")
     async def serve_attachment(token: str, filename: str, session: str | None = Cookie(default=None, alias="session")):

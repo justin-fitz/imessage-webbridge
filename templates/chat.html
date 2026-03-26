@@ -296,6 +296,9 @@ const state = {
   chatName: '',
   ws: null,
   unread: {},  // chat_identifier -> count
+  msgOffset: 0,
+  loadingMore: false,
+  hasMore: true,
 };
 
 // --- WebSocket ---
@@ -385,6 +388,9 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   updateTitle();
   state.chatStyle = parseInt(item.dataset.chatStyle) || 45;
   state.chatName = item.dataset.chatName;
+  state.msgOffset = 0;
+  state.hasMore = true;
+  state.loadingMore = false;
 
   document.getElementById('chat-header').textContent = state.chatName;
   document.getElementById('empty-state').style.display = 'none';
@@ -393,12 +399,14 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   document.getElementById('send-btn').disabled = false;
   document.body.classList.add('chat-open');
 
-  // Load history
   const messagesEl = document.getElementById('messages');
   messagesEl.innerHTML = '<div style="color:#555;text-align:center;padding:20px">Loading...</div>';
 
   const resp = await fetch(`/api/chats/${encodeURIComponent(state.chatId)}/messages`);
   const messages = await resp.json();
+
+  state.msgOffset = messages.length;
+  if (messages.length < 100) state.hasMore = false;
 
   messagesEl.innerHTML = '';
   messages.forEach(msg => appendMessage(msg));
@@ -435,8 +443,7 @@ document.getElementById('msg-input').addEventListener('keydown', (e) => {
 });
 
 // --- Render ---
-function appendMessage(msg) {
-  const messagesEl = document.getElementById('messages');
+function createMessageElement(msg) {
   const div = document.createElement('div');
   div.className = `msg ${msg.is_from_me ? 'from-me' : 'from-them'}`;
 
@@ -479,6 +486,12 @@ function appendMessage(msg) {
   }
 
   div.innerHTML = html;
+  return div;
+}
+
+function appendMessage(msg) {
+  const messagesEl = document.getElementById('messages');
+  const div = createMessageElement(msg);
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -517,6 +530,40 @@ function escapeHtml(text) {
   div.textContent = text;
   return div.innerHTML;
 }
+
+// --- Infinite scroll ---
+document.getElementById('messages').addEventListener('scroll', async function() {
+  if (this.scrollTop > 50 || !state.hasMore || state.loadingMore || !state.chatId) return;
+  state.loadingMore = true;
+
+  // Save current scroll height to restore position after prepending
+  const prevHeight = this.scrollHeight;
+
+  const resp = await fetch(`/api/chats/${encodeURIComponent(state.chatId)}/messages?offset=${state.msgOffset}&limit=100`);
+  const older = await resp.json();
+
+  if (older.length === 0) {
+    state.hasMore = false;
+    state.loadingMore = false;
+    return;
+  }
+
+  state.msgOffset += older.length;
+  if (older.length < 100) state.hasMore = false;
+
+  // Prepend older messages at the top
+  const fragment = document.createDocumentFragment();
+  older.forEach(msg => {
+    const div = createMessageElement(msg);
+    fragment.appendChild(div);
+  });
+  this.insertBefore(fragment, this.firstChild);
+
+  // Restore scroll position so it doesn't jump
+  this.scrollTop = this.scrollHeight - prevHeight;
+  showLastStatus();
+  state.loadingMore = false;
+});
 
 // --- Init ---
 connectWS();
