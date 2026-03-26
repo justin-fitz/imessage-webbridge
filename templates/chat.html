@@ -827,10 +827,10 @@ window.addEventListener('focus', stopFlash);
 function showNotification(senderName, text) {
   if (!prefs.notify || Notification.permission !== 'granted') return;
   const body = text || '(attachment)';
-  const n = new Notification(senderName, {
+  const n = new Notification(`${senderName} — iMessage`, {
     body: body.substring(0, 200),
-    icon: '',
-    tag: 'imsg-' + Date.now(),
+    tag: 'imsg-' + senderName,
+    renotify: true,
     silent: !prefs.sound,
   });
   n.onclick = () => {
