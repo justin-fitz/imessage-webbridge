@@ -20,11 +20,17 @@ from models import BridgeMessage
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def _sanitize_text(text: str | None) -> str | None:
-    """Remove invalid Unicode surrogates that break JSON serialization."""
-    if text is None:
-        return None
-    return text.encode("utf-8", errors="replace").decode("utf-8")
+def _sanitize(obj):
+    """Recursively sanitize strings in a data structure to remove invalid Unicode."""
+    if isinstance(obj, str):
+        return obj.encode("utf-8", errors="replace").decode("utf-8")
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
+
+
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 # Session tokens: token -> expiry timestamp
@@ -151,7 +157,7 @@ class WebBridge:
             "chat_style": msg.chat_style,
             "sender_id": sender_name,
             "is_from_me": msg.is_from_me,
-            "text": _sanitize_text(msg.text),
+            "text": _sanitize(msg.text),
             "timestamp": msg.timestamp.isoformat(),
             "attachments": [
                 {
@@ -163,7 +169,7 @@ class WebBridge:
                 if a.filename and os.path.exists(a.filename)
             ],
         }
-        await self.manager.broadcast(data)
+        await self.manager.broadcast(_sanitize(data))
 
 
 def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) -> list[dict]:
@@ -202,9 +208,9 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
             "chat_identifier": row["chat_identifier"],
             "display_name": display_name,
             "style": style,
-            "last_text": _sanitize_text((row["last_text"] or "")[:80]),
+            "last_text": (row["last_text"] or "")[:80],
         })
-    return chats
+    return _sanitize(chats)
 
 
 _attachment_registry: dict[str, tuple[str, float]] = {}
@@ -346,9 +352,9 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
         msg_reactions = reactions.get(row["guid"], [])
 
         messages.append({
-            "text": _sanitize_text(text),
+            "text": _sanitize(text),
             "is_from_me": bool(row["is_from_me"]),
-            "sender_id": _sanitize_text(sender_name or sender_id),
+            "sender_id": _sanitize(sender_name or sender_id),
             "timestamp": ts,
             "status": status,
             "attachments": attachments,
@@ -356,7 +362,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
         })
 
     conn.close()
-    return messages
+    return _sanitize(messages)
 
 
 LOGIN_HTML = """<!DOCTYPE html>
