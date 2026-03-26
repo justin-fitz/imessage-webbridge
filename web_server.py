@@ -487,7 +487,7 @@ def create_app(core: AppCore) -> FastAPI:
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
         limit = min(limit, 200)
-        return get_chat_messages(core.config.imessage.db_path, chat_identifier, contacts, limit=limit, offset=offset)
+        return get_chat_messages(core.config.imessage.db_path, chat_identifier, contact_store.contacts, limit=limit, offset=offset)
 
     @app.get("/api/attachments/{token}/{filename}")
     async def serve_attachment(token: str, filename: str, session: str | None = Cookie(default=None, alias="session")):
