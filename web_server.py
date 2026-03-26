@@ -18,6 +18,13 @@ from imessage_reader import APPLE_EPOCH_OFFSET
 from models import BridgeMessage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _sanitize_text(text: str | None) -> str | None:
+    """Remove invalid Unicode surrogates that break JSON serialization."""
+    if text is None:
+        return None
+    return text.encode("utf-8", errors="replace").decode("utf-8")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 # Session tokens: token -> expiry timestamp
@@ -144,7 +151,7 @@ class WebBridge:
             "chat_style": msg.chat_style,
             "sender_id": sender_name,
             "is_from_me": msg.is_from_me,
-            "text": msg.text,
+            "text": _sanitize_text(msg.text),
             "timestamp": msg.timestamp.isoformat(),
             "attachments": [
                 {
@@ -195,7 +202,7 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
             "chat_identifier": row["chat_identifier"],
             "display_name": display_name,
             "style": style,
-            "last_text": (row["last_text"] or "")[:80],
+            "last_text": _sanitize_text((row["last_text"] or "")[:80]),
         })
     return chats
 
@@ -339,9 +346,9 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
         msg_reactions = reactions.get(row["guid"], [])
 
         messages.append({
-            "text": text,
+            "text": _sanitize_text(text),
             "is_from_me": bool(row["is_from_me"]),
-            "sender_id": sender_name or sender_id,
+            "sender_id": _sanitize_text(sender_name or sender_id),
             "timestamp": ts,
             "status": status,
             "attachments": attachments,
