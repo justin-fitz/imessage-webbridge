@@ -310,8 +310,12 @@ function connectWS() {
     document.getElementById('status-text').textContent = 'Connected';
   };
 
-  state.ws.onclose = () => {
+  state.ws.onclose = (event) => {
     document.getElementById('status-dot').className = 'dot disconnected';
+    if (event.code === 1008) {
+      document.getElementById('status-text').textContent = 'Auth failed — reload page';
+      return;  // don't reconnect on auth failure
+    }
     document.getElementById('status-text').textContent = 'Disconnected — reconnecting...';
     setTimeout(connectWS, 2000);
   };

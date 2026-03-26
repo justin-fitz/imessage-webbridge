@@ -7,12 +7,10 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import Cookie, FastAPI, Form, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.requests import Request
 
 from bridge import Bridge
 from contacts import get_group_members, load_contacts, resolve_identifier
@@ -21,7 +19,28 @@ from models import BridgeMessage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
-security = HTTPBasic()
+
+# Session tokens: token -> expiry timestamp
+_sessions: dict[str, float] = {}
+_SESSION_TTL = 86400 * 7  # 7 days
+
+
+def _create_session() -> str:
+    token = secrets.token_urlsafe(32)
+    _sessions[token] = time.time() + _SESSION_TTL
+    return token
+
+
+def _valid_session(token: str | None) -> bool:
+    if not token:
+        return False
+    expiry = _sessions.get(token)
+    if not expiry:
+        return False
+    if time.time() > expiry:
+        del _sessions[token]
+        return False
+    return True
 
 
 class ConnectionManager:
@@ -52,8 +71,6 @@ class ConnectionManager:
 
 
 class StatusPoller:
-    """Polls chat.db for delivery/read status changes on recent sent messages."""
-
     def __init__(self, db_path: str, manager: ConnectionManager, interval: int = 3):
         self.db_path = db_path
         self.manager = manager
@@ -112,8 +129,6 @@ class StatusPoller:
 
 
 class WebBridge:
-    """Web UI message handler — registered with Bridge.add_handler()."""
-
     def __init__(self, manager: ConnectionManager, contacts: dict[str, str] | None = None):
         self.manager = manager
         self.contacts = contacts or {}
@@ -185,9 +200,8 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
     return chats
 
 
-# Attachment registry: token -> (filepath, created_at)
 _attachment_registry: dict[str, tuple[str, float]] = {}
-_ATTACHMENT_TTL = 3600  # 1 hour
+_ATTACHMENT_TTL = 3600
 
 
 def _register_attachment(filepath: str) -> str | None:
@@ -301,6 +315,33 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
     return messages
 
 
+LOGIN_HTML = """<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>iMessage Bridge - Login</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #e0e0e0;
+         display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+  form { background: #222; padding: 32px; border-radius: 12px; width: 300px; }
+  h2 { margin: 0 0 20px; font-size: 18px; }
+  input { width: 100%; padding: 10px 14px; border: 1px solid #444; border-radius: 8px;
+          background: #2a2a2a; color: #e0e0e0; font-size: 14px; box-sizing: border-box; }
+  input:focus { border-color: #0b84fe; outline: none; }
+  button { width: 100%; padding: 10px; margin-top: 12px; background: #0b84fe; color: #fff;
+           border: none; border-radius: 8px; font-size: 14px; cursor: pointer; }
+  button:hover { background: #0a75e0; }
+  .error { color: #ff3b30; font-size: 12px; margin-top: 8px; }
+</style>
+</head><body>
+<form method="POST" action="/login">
+  <h2>iMessage Bridge</h2>
+  <input type="password" name="password" placeholder="Password" autofocus>
+  <button type="submit">Login</button>
+  {error}
+</form>
+</body></html>"""
+
+
 def create_app(bridge: Bridge) -> FastAPI:
     app = FastAPI()
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
@@ -316,16 +357,11 @@ def create_app(bridge: Bridge) -> FastAPI:
     max_msg_len = bridge.config.web.max_message_length
     allowed_origins = set(bridge.config.web.allowed_origins)
 
-    def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    def require_auth(session: str | None = Cookie(default=None, alias="session")):
         if not password:
-            return credentials
-        if not secrets.compare_digest(credentials.password, password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials",
-                headers={"WWW-Authenticate": "Basic"},
-            )
-        return credentials
+            return
+        if not _valid_session(session):
+            raise HTTPException(status_code=303, headers={"Location": "/login"})
 
     @app.on_event("startup")
     async def startup():
@@ -341,21 +377,44 @@ def create_app(bridge: Bridge) -> FastAPI:
             _prune_attachments()
             await asyncio.sleep(300)
 
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page():
+        if not password:
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse(LOGIN_HTML.replace("{error}", ""))
+
+    @app.post("/login")
+    async def login_submit(response: Response, password_input: str = Form(alias="password")):
+        if not password or secrets.compare_digest(password_input, password):
+            token = _create_session()
+            resp = RedirectResponse("/", status_code=303)
+            resp.set_cookie("session", token, httponly=True, samesite="strict", max_age=_SESSION_TTL)
+            return resp
+        return HTMLResponse(LOGIN_HTML.replace("{error}", '<div class="error">Invalid password</div>'), status_code=401)
+
     @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request, _=Depends(verify_credentials)):
+    async def index(request: Request, session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            return RedirectResponse("/login", status_code=303)
         chats = get_recent_chats(bridge.config.imessage.db_path, contacts)
-        return templates.TemplateResponse(request, "chat.html", {"chats": chats, "ws_token": password})
+        return templates.TemplateResponse(request, "chat.html", {"chats": chats, "ws_token": session or ""})
 
     @app.get("/api/chats")
-    async def api_chats(_=Depends(verify_credentials)):
+    async def api_chats(session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
         return get_recent_chats(bridge.config.imessage.db_path, contacts)
 
     @app.get("/api/chats/{chat_identifier:path}/messages")
-    async def api_messages(chat_identifier: str, _=Depends(verify_credentials)):
+    async def api_messages(chat_identifier: str, session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
         return get_chat_messages(bridge.config.imessage.db_path, chat_identifier, contacts)
 
     @app.get("/api/attachments/{token}/{filename}")
-    async def serve_attachment(token: str, filename: str, _=Depends(verify_credentials)):
+    async def serve_attachment(token: str, filename: str, session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
         entry = _attachment_registry.get(token)
         if not entry:
             raise HTTPException(status_code=404)
@@ -383,18 +442,21 @@ def create_app(bridge: Bridge) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
+        # Authenticate via session token in query param
+        if password:
+            token = ws.query_params.get("token", "")
+            if not _valid_session(token):
+                await ws.accept()
+                await ws.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
+                await ws.close(code=1008)
+                return
+
         # Check Origin header
         origin = ws.headers.get("origin", "")
         if allowed_origins and origin and origin not in allowed_origins:
-            await ws.close(code=1008, reason="Origin not allowed")
+            await ws.accept()
+            await ws.close(code=1008)
             return
-
-        # Authenticate via query param token (password)
-        if password:
-            token = ws.query_params.get("token", "")
-            if not secrets.compare_digest(token, password):
-                await ws.close(code=1008, reason="Unauthorized")
-                return
 
         connected = await manager.connect(ws)
         if not connected:
@@ -403,21 +465,17 @@ def create_app(bridge: Bridge) -> FastAPI:
             while True:
                 data = await ws.receive_text()
                 if len(data) > max_msg_len * 2:
-                    continue  # drop oversized frames
+                    continue
                 msg = json.loads(data)
                 if msg.get("type") == "send":
                     chat_id = msg.get("chat_identifier", "")
                     chat_style = msg.get("chat_style", 45)
                     text = msg.get("text", "")
 
-                    # Validate chat exists
                     if chat_id not in known_chats:
                         continue
-
-                    # Cap message length
                     if len(text) > max_msg_len:
                         text = text[:max_msg_len]
-
                     if text:
                         bridge.send_to_imessage(chat_id, chat_style, text=text)
         except WebSocketDisconnect:
