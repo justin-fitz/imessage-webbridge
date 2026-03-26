@@ -536,6 +536,11 @@ function connectWS() {
       if (data.chat_identifier === state.chatId) {
         appendMessage(data);
         showLastStatus();
+        if (!data.is_from_me && document.hidden) {
+          const senderName = data.sender_id || data.chat_display_name || data.chat_identifier;
+          showNotification(senderName, data.text);
+          startFlash(`New message from ${senderName}`);
+        }
       } else if (!data.is_from_me) {
         const cid = data.chat_identifier;
         state.unread[cid] = (state.unread[cid] || 0) + 1;
