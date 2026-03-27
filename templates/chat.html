@@ -535,7 +535,9 @@ function connectWS() {
     const data = JSON.parse(event.data);
     if (data.type === 'message') {
       if (data.chat_identifier === state.chatId) {
-        appendMessage(data);
+        if (!data.is_from_me) {
+          appendMessage(data);
+        }
         showLastStatus();
         if (!data.is_from_me && document.hidden) {
           const senderName = data.sender_id || data.chat_display_name || data.chat_identifier;
