@@ -71,6 +71,30 @@ def load_contacts() -> dict[str, str]:
     return contacts
 
 
+def search_contacts(query: str, contacts: dict[str, str], limit: int = 20) -> list[dict]:
+    """Search contacts by name or identifier. Returns list of {name, identifier}."""
+    query_lower = query.lower()
+    results = []
+    seen = set()
+    for identifier, name in contacts.items():
+        if query_lower in name.lower() or query_lower in identifier.lower():
+            if name not in seen:
+                # Format phone numbers for display
+                if "@" not in identifier and identifier.isdigit():
+                    if len(identifier) == 10:
+                        display_id = f"+1{identifier}"
+                    else:
+                        display_id = f"+{identifier}"
+                else:
+                    display_id = identifier
+                results.append({"name": name, "identifier": display_id})
+                seen.add(name)
+            if len(results) >= limit:
+                break
+    results.sort(key=lambda r: r["name"])
+    return results
+
+
 def resolve_identifier(identifier: str, contacts: dict[str, str]) -> str | None:
     """Look up a chat_identifier or handle id in the contacts dict."""
     if not identifier:

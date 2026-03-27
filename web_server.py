@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app_core import AppCore
-from contacts import get_group_members, load_contacts, resolve_identifier
+from contacts import get_group_members, load_contacts, resolve_identifier, search_contacts
 from imessage_reader import APPLE_EPOCH_OFFSET
 from models import ChatMessage
 
@@ -566,11 +566,37 @@ def create_app(core: AppCore) -> FastAPI:
         web_handler.contacts = contact_store.contacts
         return {"count": contact_store.count, "last_sync": contact_store.last_sync}
 
+    @app.get("/api/contacts/search")
+    async def contacts_search(q: str = "", session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        if len(q) < 2:
+            return []
+        return search_contacts(q, contact_store.contacts)
+
     @app.get("/api/contacts/status")
     async def contacts_status(session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
         return {"count": contact_store.count, "last_sync": contact_store.last_sync}
+
+    @app.post("/api/messages/new")
+    async def send_new_message(request: Request, session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        body = await request.json()
+        recipients = body.get("recipients", [])
+        text = body.get("text", "").strip()
+        if not recipients or not text:
+            raise HTTPException(status_code=400, detail="recipients and text required")
+        if len(text) > max_msg_len:
+            text = text[:max_msg_len]
+        for recipient in recipients:
+            core.send_to_imessage(recipient, 45, text=text)
+        # Refresh known chats so WebSocket sending works for this chat going forward
+        nonlocal known_chats
+        known_chats = _get_known_chat_identifiers(core.config.imessage.db_path)
+        return {"ok": True}
 
     @app.get("/api/chats/{chat_identifier:path}/messages")
     async def api_messages(chat_identifier: str, offset: int = 0, limit: int = 100, session: str | None = Cookie(default=None, alias="session")):
