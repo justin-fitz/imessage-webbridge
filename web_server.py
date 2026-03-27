@@ -452,6 +452,7 @@ LOGIN_HTML = """<!DOCTYPE html>
   .error { color: #ff3b30; font-size: 12px; margin-top: 8px; }
 </style>
 </head><body>
+<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');</script>
 <form method="POST" action="/login">
   <img src="/static/logo2.svg" alt="" class="login-logo">
   <h2>iMessage Web Gateway</h2>
