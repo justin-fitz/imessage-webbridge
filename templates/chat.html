@@ -680,6 +680,11 @@ function updateSidebarPreview(data) {
     if (preview && data.text) {
       preview.textContent = data.text.substring(0, 80);
     }
+    // Move chat to top of list
+    const list = document.getElementById('chat-list');
+    if (item !== list.firstElementChild) {
+      list.insertBefore(item, list.firstElementChild);
+    }
   }
 }
 
