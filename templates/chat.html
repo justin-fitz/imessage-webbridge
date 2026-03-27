@@ -701,6 +701,9 @@ function updateTitle() {
   const base = 'iMessage Web Gateway';
   document.title = total > 0 ? `(${total}) ${base}` : base;
   originalTitle = document.title;
+  if (navigator.setAppBadge) {
+    total > 0 ? navigator.setAppBadge(total) : navigator.clearAppBadge();
+  }
 }
 
 // --- Chat selection ---
