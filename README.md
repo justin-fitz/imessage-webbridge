@@ -174,3 +174,11 @@ python -m pytest tests/ -v
 ```
 
 71 tests covering config loading, message reading, message sending, contact resolution, channel mapping, WebSocket management, delivery status, pagination, and full app integration.
+
+## Author
+
+Justin Fitzhugh — [justin@studiox.net](mailto:justin@studiox.net)
+
+## License
+
+[MIT](LICENSE)
