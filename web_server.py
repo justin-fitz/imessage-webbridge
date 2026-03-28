@@ -36,8 +36,6 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 _SESSION_TTL = 86400  # 24 hours
 _session_db: sqlite3.Connection | None = None
 _login_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
-_MAX_LOGIN_ATTEMPTS = 5
-_LOGIN_WINDOW = 300  # 5 minutes
 
 
 def _init_session_db(db_path: str):
@@ -523,6 +521,8 @@ def create_app(core: AppCore) -> FastAPI:
     password = core.config.web.password
     max_msg_len = core.config.web.max_message_length
     allowed_origins = set(core.config.web.allowed_origins)
+    login_rate_limit = core.config.web.login_rate_limit
+    login_rate_window = core.config.web.login_rate_window
 
     def require_auth(session: str | None = Cookie(default=None, alias="session")):
         if not password:
@@ -557,8 +557,8 @@ def create_app(core: AppCore) -> FastAPI:
 
         # Rate limiting
         attempts = _login_attempts.get(client_ip, [])
-        attempts = [t for t in attempts if now - t < _LOGIN_WINDOW]
-        if len(attempts) >= _MAX_LOGIN_ATTEMPTS:
+        attempts = [t for t in attempts if now - t < login_rate_window]
+        if len(attempts) >= login_rate_limit:
             return HTMLResponse(
                 LOGIN_HTML.replace("{error}", '<div class="error">Too many attempts. Try again later.</div>'),
                 status_code=429,

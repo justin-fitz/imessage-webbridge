@@ -12,6 +12,8 @@ class WebConfig:
     allowed_origins: list[str] = field(default_factory=list)
     max_connections: int = 20
     max_message_length: int = 10000
+    login_rate_limit: int = 5
+    login_rate_window: int = 300
 
 
 @dataclass
@@ -59,6 +61,8 @@ def load_config(path: str) -> Config:
         allowed_origins=w.get("allowed_origins", []),
         max_connections=w.get("max_connections", 20),
         max_message_length=w.get("max_message_length", 10000),
+        login_rate_limit=w.get("login_rate_limit", 5),
+        login_rate_window=w.get("login_rate_window", 300),
     )
 
     return Config(imessage=imessage_cfg, app=app_cfg, web=web_cfg)
