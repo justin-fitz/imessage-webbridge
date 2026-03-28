@@ -39,7 +39,7 @@ _session_db: sqlite3.Connection | None = None
 
 def _init_session_db(db_path: str):
     global _session_db
-    _session_db = sqlite3.connect(db_path)
+    _session_db = sqlite3.connect(db_path, check_same_thread=False)
     _session_db.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             token TEXT PRIMARY KEY,
