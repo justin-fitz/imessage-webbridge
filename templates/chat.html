@@ -251,6 +251,21 @@
   .msg-file:hover { background: rgba(255,255,255,0.15); }
   .msg.from-me .msg-file { background: rgba(0,0,0,0.15); color: rgba(255,255,255,0.8); }
 
+  .msg-reply {
+    font-size: 12px;
+    padding: 4px 8px;
+    margin-bottom: 4px;
+    border-left: 2px solid rgba(255,255,255,0.3);
+    color: #aaa;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .msg.from-me .msg-reply { border-left-color: rgba(255,255,255,0.4); color: rgba(255,255,255,0.6); }
+  .msg-reply .reply-sender { font-weight: 600; color: #ccc; }
+  .msg.from-me .msg-reply .reply-sender { color: rgba(255,255,255,0.8); }
+
   .msg-reactions {
     display: flex;
     gap: 2px;
@@ -864,6 +879,11 @@ function createMessageElement(msg, showAvatar) {
 
   if (fromThem && isGroup && showAvatar && msg.sender_id) {
     html += `<div class="msg-sender">${escapeHtml(msg.sender_id)}</div>`;
+  }
+
+  if (msg.reply_to) {
+    const replySender = msg.reply_to.is_from_me ? 'You' : escapeHtml(msg.reply_to.sender);
+    html += `<div class="msg-reply"><span class="reply-sender">${replySender}</span> ${escapeHtml(msg.reply_to.text)}</div>`;
   }
 
   const timeHtml = msg.timestamp

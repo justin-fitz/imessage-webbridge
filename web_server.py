@@ -368,11 +368,16 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
     rows = conn.execute("""
         SELECT m.ROWID, m.guid, m.text, m.is_from_me, m.date, m.attributedBody,
                m.cache_has_attachments,
-               m.date_delivered, m.date_read, h.id as sender_id
+               m.date_delivered, m.date_read, h.id as sender_id,
+               m.thread_originator_guid,
+               orig.text as reply_to_text, orig.attributedBody as reply_to_body,
+               orig.is_from_me as reply_to_from_me, h2.id as reply_to_sender
         FROM message m
         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
         JOIN chat c ON cmj.chat_id = c.ROWID
         LEFT JOIN handle h ON m.handle_id = h.ROWID
+        LEFT JOIN message orig ON m.thread_originator_guid = orig.guid
+        LEFT JOIN handle h2 ON orig.handle_id = h2.ROWID
         WHERE c.chat_identifier = ?
           AND m.item_type = 0
           AND m.associated_message_type = 0
@@ -417,6 +422,20 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
 
         msg_reactions = reactions.get(row["guid"], [])
 
+        reply_to = None
+        if row["thread_originator_guid"]:
+            reply_text = row["reply_to_text"]
+            if reply_text is None and row["reply_to_body"]:
+                reply_text = IMessageReader._extract_attributed_text(row["reply_to_body"])
+            if reply_text:
+                reply_sender = row["reply_to_sender"] or "me"
+                reply_sender_name = resolve_identifier(reply_sender, contacts) if reply_sender != "me" else "me"
+                reply_to = {
+                    "text": _sanitize(reply_text)[:100],
+                    "sender": _sanitize(reply_sender_name or reply_sender),
+                    "is_from_me": bool(row["reply_to_from_me"]),
+                }
+
         messages.append({
             "text": _sanitize(text),
             "is_from_me": bool(row["is_from_me"]),
@@ -425,6 +444,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
             "status": status,
             "attachments": attachments,
             "reactions": msg_reactions,
+            "reply_to": reply_to,
         })
 
     conn.close()
