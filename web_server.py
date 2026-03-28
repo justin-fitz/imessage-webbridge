@@ -35,6 +35,9 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 _SESSION_TTL = 86400  # 24 hours
 _session_db: sqlite3.Connection | None = None
+_login_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
+_MAX_LOGIN_ATTEMPTS = 5
+_LOGIN_WINDOW = 300  # 5 minutes
 
 
 def _init_session_db(db_path: str):
@@ -548,12 +551,29 @@ def create_app(core: AppCore) -> FastAPI:
         return HTMLResponse(LOGIN_HTML.replace("{error}", ""))
 
     @app.post("/login")
-    async def login_submit(response: Response, password_input: str = Form(alias="password")):
+    async def login_submit(request: Request, response: Response, password_input: str = Form(alias="password")):
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.time()
+
+        # Rate limiting
+        attempts = _login_attempts.get(client_ip, [])
+        attempts = [t for t in attempts if now - t < _LOGIN_WINDOW]
+        if len(attempts) >= _MAX_LOGIN_ATTEMPTS:
+            return HTMLResponse(
+                LOGIN_HTML.replace("{error}", '<div class="error">Too many attempts. Try again later.</div>'),
+                status_code=429,
+            )
+
         if not password or secrets.compare_digest(password_input, password):
+            _login_attempts.pop(client_ip, None)
             token = _create_session()
             resp = RedirectResponse("/", status_code=303)
-            resp.set_cookie("session", token, httponly=True, samesite="strict", max_age=_SESSION_TTL)
+            is_secure = request.url.scheme == "https"
+            resp.set_cookie("session", token, httponly=True, samesite="strict", secure=is_secure, max_age=_SESSION_TTL)
             return resp
+
+        attempts.append(now)
+        _login_attempts[client_ip] = attempts
         return HTMLResponse(LOGIN_HTML.replace("{error}", '<div class="error">Invalid password</div>'), status_code=401)
 
     @app.get("/logout")

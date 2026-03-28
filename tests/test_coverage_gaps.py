@@ -1037,6 +1037,41 @@ class TestWebSocketEndpoint:
         core.sender.send_text.assert_not_called()
 
 
+class TestLoginRateLimit:
+    def _make_client(self, tmp_path):
+        from web_server import create_app, _login_attempts
+        _login_attempts.clear()
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        config = Config(
+            imessage=IMessageConfig(db_path=db_path),
+            app=AppConfig(state_db=str(tmp_path / "state.db"), temp_dir=str(tmp_path / "tmp")),
+            web=WebConfig(password="testpass"),
+        )
+        with patch("app_core.IMessageReader"):
+            core = AppCore(config)
+        app = create_app(core)
+        from fastapi.testclient import TestClient
+        return TestClient(app)
+
+    def test_rate_limit_after_5_failures(self, tmp_path):
+        client = self._make_client(tmp_path)
+        for _ in range(5):
+            resp = client.post("/login", data={"password": "wrong"})
+            assert resp.status_code == 401
+        # 6th attempt should be rate limited
+        resp = client.post("/login", data={"password": "wrong"})
+        assert resp.status_code == 429
+        assert "Too many attempts" in resp.text
+
+    def test_successful_login_resets_attempts(self, tmp_path):
+        client = self._make_client(tmp_path)
+        for _ in range(3):
+            client.post("/login", data={"password": "wrong"})
+        # Successful login should clear attempts
+        resp = client.post("/login", data={"password": "testpass"}, follow_redirects=False)
+        assert resp.status_code == 303
+
+
 class TestNoPasswordMode:
     def test_login_redirects_when_no_password(self, tmp_path):
         from web_server import create_app
