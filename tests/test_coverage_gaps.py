@@ -643,6 +643,400 @@ class TestAppEndpoints:
 
 # --- No-password mode tests ---
 
+# --- Additional web_server coverage ---
+
+class TestSessionExpiry:
+    def test_expired_session_cleanup(self, tmp_path):
+        """Line 72-74: expired session deletion in _valid_session."""
+        import web_server
+        web_server._init_session_db(str(tmp_path / "sessions.db"))
+        # Insert a session that expired 10 seconds ago
+        web_server._session_db.execute("INSERT INTO sessions (token, expiry) VALUES (?, ?)", ("exp-tok", time.time() - 10))
+        web_server._session_db.commit()
+        assert web_server._valid_session("exp-tok") is False
+        # Should have been deleted
+        row = web_server._session_db.execute("SELECT token FROM sessions WHERE token = 'exp-tok'").fetchone()
+        assert row is None
+
+
+class TestStatusPollerEdgeCases:
+    @pytest.mark.asyncio
+    async def test_cache_eviction(self, tmp_path):
+        """Lines 158-160: cache eviction when > 100 entries."""
+        from web_server import StatusPoller, ConnectionManager
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        mgr = ConnectionManager()
+        poller = StatusPoller(db_path, mgr)
+        # Fill cache with >100 fake entries
+        for i in range(110):
+            poller._status_cache[10000 + i] = "sent"
+        await poller._check_status_changes()
+        # Cache should have been pruned to only contain actual message ROWIDs
+        assert len(poller._status_cache) <= 100
+
+    @pytest.mark.asyncio
+    async def test_poll_loop_error_handling(self, tmp_path):
+        """Lines 113-118: poll_loop catches exceptions."""
+        from web_server import StatusPoller, ConnectionManager
+        mgr = ConnectionManager()
+        poller = StatusPoller("/nonexistent/path.db", mgr)
+        call_count = 0
+        async def fake_sleep(n):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                raise StopAsyncIteration()
+        with patch("asyncio.sleep", side_effect=fake_sleep):
+            try:
+                await poller.poll_loop()
+            except (StopAsyncIteration, RuntimeError):
+                pass
+        # Should have attempted and caught the error without crashing
+
+
+class TestGetRecentChatsContactResolution:
+    def test_group_chat_no_display_name(self, tmp_path):
+        """Lines 220-223: group chat with no display_name resolves member names."""
+        from web_server import get_recent_chats
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        # Clear group display name
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE chat SET display_name = '' WHERE chat_identifier = 'chat123'")
+        # Add messages to the group chat
+        apple_ns = (1704067200 - APPLE_EPOCH_OFFSET) * 1_000_000_000
+        conn.execute(
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, associated_message_type) "
+            "VALUES (10, 'g-1', 'hi group', 0, ?, 1, 0, 0)", (apple_ns + 100 * 1_000_000_000,)
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (2, 10)")
+        conn.commit()
+        conn.close()
+        contacts = {"5551234567": "John", "5559876543": "Jane"}
+        chats = get_recent_chats(db_path, contacts)
+        group = [c for c in chats if c["chat_identifier"] == "chat123"][0]
+        # Display name should be resolved from members
+        assert "John" in group["display_name"]
+        assert "Jane" in group["display_name"]
+
+    def test_individual_chat_no_display_name(self, tmp_path):
+        """Lines 224-225: individual chat with no display_name resolves from contacts."""
+        from web_server import get_recent_chats
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE chat SET display_name = '' WHERE chat_identifier = '+15551234567'")
+        conn.commit()
+        conn.close()
+        contacts = {"5551234567": "John Smith"}
+        chats = get_recent_chats(db_path, contacts)
+        ind = [c for c in chats if c["chat_identifier"] == "+15551234567"][0]
+        assert ind["display_name"] == "John Smith"
+
+
+class TestGetChatMessagesEdgeCases:
+    def test_message_with_attributedBody(self, tmp_path):
+        """Line 396: attributedBody fallback when text is None."""
+        from web_server import get_chat_messages
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        conn = sqlite3.connect(db_path)
+        apple_ns = (1704067200 - APPLE_EPOCH_OFFSET) * 1_000_000_000
+        # Insert message with no text but with attributedBody — use a dummy that won't parse
+        conn.execute(
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, "
+            "associated_message_type, attributedBody) VALUES (20, 'ab-1', NULL, 0, ?, 1, 0, 0, X'00')",
+            (apple_ns + 20 * 1_000_000_000,)
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 20)")
+        conn.commit()
+        conn.close()
+        # Should not crash — message may be skipped if attributedBody can't be parsed
+        messages = get_chat_messages(db_path, "+15551234567", {})
+        # Original 3 messages should still be there
+        assert len(messages) >= 3
+
+    def test_message_with_attachments(self, tmp_path):
+        """Line 399-400: message with cache_has_attachments."""
+        from web_server import get_chat_messages
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        photo = tmp_path / "photo.jpg"
+        photo.write_bytes(b"\xff\xd8")
+        conn = sqlite3.connect(db_path)
+        apple_ns = (1704067200 - APPLE_EPOCH_OFFSET) * 1_000_000_000
+        conn.execute(
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, "
+            "cache_has_attachments, item_type, associated_message_type) "
+            "VALUES (21, 'att-1', 'see pic', 0, ?, 1, 1, 0, 0)",
+            (apple_ns + 21 * 1_000_000_000,)
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 21)")
+        conn.execute(
+            "INSERT INTO attachment (ROWID, filename, mime_type, transfer_name, total_bytes) "
+            "VALUES (1, ?, 'image/jpeg', 'photo.jpg', 1024)", (str(photo),)
+        )
+        conn.execute("INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (21, 1)")
+        conn.commit()
+        conn.close()
+        messages = get_chat_messages(db_path, "+15551234567", {})
+        att_msg = [m for m in messages if m["text"] == "see pic"][0]
+        assert len(att_msg["attachments"]) == 1
+
+    def test_message_with_zero_date(self, tmp_path):
+        """Line 405-406: message with date = 0."""
+        from web_server import get_chat_messages
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, associated_message_type) "
+            "VALUES (22, 'zero-date', 'no date', 0, 0, 1, 0, 0)"
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 22)")
+        conn.commit()
+        conn.close()
+        messages = get_chat_messages(db_path, "+15551234567", {})
+        zero_msg = [m for m in messages if m["text"] == "no date"][0]
+        assert zero_msg["timestamp"] == ""
+
+    def test_message_with_delivery_status(self, tmp_path):
+        """Lines 416-421: status for sent messages."""
+        from web_server import get_chat_messages
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        conn = sqlite3.connect(db_path)
+        apple_ns = (1704067200 - APPLE_EPOCH_OFFSET) * 1_000_000_000
+        # Sent, delivered
+        conn.execute(
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, "
+            "associated_message_type, date_delivered, date_read) "
+            "VALUES (23, 'del-1', 'delivered msg', 1, ?, 1, 0, 0, ?, 0)",
+            (apple_ns + 23 * 1_000_000_000, apple_ns + 24 * 1_000_000_000)
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 23)")
+        # Sent, read
+        conn.execute(
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, "
+            "associated_message_type, date_delivered, date_read) "
+            "VALUES (24, 'read-1', 'read msg', 1, ?, 1, 0, 0, ?, ?)",
+            (apple_ns + 25 * 1_000_000_000, apple_ns + 26 * 1_000_000_000, apple_ns + 27 * 1_000_000_000)
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 24)")
+        conn.commit()
+        conn.close()
+        messages = get_chat_messages(db_path, "+15551234567", {})
+        del_msg = [m for m in messages if m["text"] == "delivered msg"][0]
+        assert del_msg["status"] == "delivered"
+        read_msg = [m for m in messages if m["text"] == "read msg"][0]
+        assert read_msg["status"] == "read"
+
+    def test_null_text_null_body_skipped(self, tmp_path):
+        """Line 407-408: messages with no text, no body, no attachments are skipped."""
+        from web_server import get_chat_messages
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        conn = sqlite3.connect(db_path)
+        apple_ns = (1704067200 - APPLE_EPOCH_OFFSET) * 1_000_000_000
+        conn.execute(
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, "
+            "associated_message_type, attributedBody) "
+            "VALUES (25, 'empty-1', NULL, 0, ?, 1, 0, 0, NULL)",
+            (apple_ns + 30 * 1_000_000_000,)
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 25)")
+        conn.commit()
+        conn.close()
+        messages = get_chat_messages(db_path, "+15551234567", {})
+        # The empty message should be skipped
+        guids = [m.get("guid") for m in messages]
+        assert "empty-1" not in str(messages)
+
+    def test_reply_to_from_me(self, tmp_path):
+        """Line 429,432: reply_to with reply_to_from_me and resolve sender."""
+        from web_server import get_chat_messages
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        conn = sqlite3.connect(db_path)
+        apple_ns = (1704067200 - APPLE_EPOCH_OFFSET) * 1_000_000_000
+        # Original message from me (handle_id=0 since it's from me)
+        conn.execute(
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, associated_message_type) "
+            "VALUES (30, 'orig-me', 'my original', 1, ?, 0, 0, 0)",
+            (apple_ns + 30 * 1_000_000_000,)
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 30)")
+        # Reply to it from someone else
+        conn.execute(
+            "INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, "
+            "associated_message_type, thread_originator_guid) "
+            "VALUES (31, 'reply-me', 'replying to you', 0, ?, 1, 0, 0, 'orig-me')",
+            (apple_ns + 31 * 1_000_000_000,)
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 31)")
+        conn.commit()
+        conn.close()
+        messages = get_chat_messages(db_path, "+15551234567", {})
+        reply = [m for m in messages if m["text"] == "replying to you"][0]
+        assert reply["reply_to"] is not None
+        assert reply["reply_to"]["is_from_me"] is True
+        assert reply["reply_to"]["sender"] == "me"
+
+
+class TestCustomEmojiFromBody:
+    def test_extract_from_attributed_body(self):
+        """Lines 269-271: fallback to attributedBody for emoji extraction."""
+        from web_server import _extract_custom_emoji
+        # When text is None but attributed_body has content, it should try to parse
+        # We pass a dummy body that won't parse — should return None gracefully
+        assert _extract_custom_emoji(None, b"\x00\x01\x02") is None
+
+
+class TestAttachmentEndpointEdgeCases:
+    def _make_client(self, tmp_path):
+        from web_server import create_app
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        config = Config(
+            imessage=IMessageConfig(db_path=db_path),
+            app=AppConfig(state_db=str(tmp_path / "state.db"), temp_dir=str(tmp_path / "tmp")),
+            web=WebConfig(password="testpass"),
+        )
+        with patch("app_core.IMessageReader"):
+            core = AppCore(config)
+        app = create_app(core)
+        from fastapi.testclient import TestClient
+        return TestClient(app), core
+
+    def _login(self, client):
+        client.post("/login", data={"password": "testpass"})
+
+    def test_serve_valid_attachment(self, tmp_path):
+        """Lines 635-655: successful attachment serving."""
+        from web_server import _attachment_registry
+        client, _ = self._make_client(tmp_path)
+        self._login(client)
+        f = tmp_path / "test.txt"
+        f.write_text("hello")
+        token = "test-token-123"
+        _attachment_registry[token] = (str(f), time.time())
+        resp = client.get(f"/api/attachments/{token}/test.txt")
+        assert resp.status_code == 200
+        assert resp.text == "hello"
+        del _attachment_registry[token]
+
+    def test_serve_expired_attachment(self, tmp_path):
+        """Line 636-638: expired attachment returns 404."""
+        from web_server import _attachment_registry
+        client, _ = self._make_client(tmp_path)
+        self._login(client)
+        f = tmp_path / "old.txt"
+        f.write_text("old data")
+        token = "expired-tok"
+        _attachment_registry[token] = (str(f), time.time() - 7200)
+        resp = client.get(f"/api/attachments/{token}/old.txt")
+        assert resp.status_code == 404
+
+    def test_serve_missing_file_attachment(self, tmp_path):
+        """Line 639-640: file doesn't exist on disk."""
+        from web_server import _attachment_registry
+        client, _ = self._make_client(tmp_path)
+        self._login(client)
+        token = "gone-tok"
+        _attachment_registry[token] = ("/nonexistent/file.txt", time.time())
+        resp = client.get(f"/api/attachments/{token}/file.txt")
+        assert resp.status_code == 404
+        del _attachment_registry[token]
+
+    def test_serve_heic_attachment(self, tmp_path):
+        """Lines 642-653: HEIC conversion path."""
+        from web_server import _attachment_registry
+        client, core = self._make_client(tmp_path)
+        self._login(client)
+        heic = tmp_path / "photo.heic"
+        heic.write_bytes(b"\x00\x00\x00\x1cftyp")  # fake HEIC header
+        token = "heic-tok"
+        _attachment_registry[token] = (str(heic), time.time())
+        # sips will fail on fake data, so it should fall back to serving the original
+        resp = client.get(f"/api/attachments/{token}/photo.heic")
+        assert resp.status_code == 200
+        del _attachment_registry[token]
+
+
+class TestWebSocketEndpoint:
+    def _make_client(self, tmp_path):
+        from web_server import create_app
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        config = Config(
+            imessage=IMessageConfig(db_path=db_path),
+            app=AppConfig(state_db=str(tmp_path / "state.db"), temp_dir=str(tmp_path / "tmp")),
+            web=WebConfig(password="testpass"),
+        )
+        with patch("app_core.IMessageReader"):
+            core = AppCore(config)
+        app = create_app(core)
+        from fastapi.testclient import TestClient
+        return TestClient(app), core
+
+    def _get_session(self, client):
+        from web_server import _create_session
+        return _create_session()
+
+    def test_ws_auth_failure(self, tmp_path):
+        """Lines 660-666: WebSocket rejected without valid token."""
+        client, _ = self._make_client(tmp_path)
+        with client.websocket_connect("/ws?token=invalid") as ws:
+            data = json.loads(ws.receive_text())
+            assert data["type"] == "error"
+            assert data["message"] == "Unauthorized"
+
+    def test_ws_auth_success_and_send(self, tmp_path):
+        """Lines 678-694: WebSocket connect and send a message."""
+        client, core = self._make_client(tmp_path)
+        token = self._get_session(client)
+        core.sender = MagicMock()
+        core.sender.send_text.return_value = True
+        with client.websocket_connect(f"/ws?token={token}") as ws:
+            ws.send_text(json.dumps({
+                "type": "send",
+                "chat_identifier": "+15551234567",
+                "chat_style": 45,
+                "text": "hello from ws",
+            }))
+            # Give it a moment then close
+        core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello from ws")
+
+    def test_ws_unknown_chat_ignored(self, tmp_path):
+        """Line 689-690: message to unknown chat is ignored."""
+        client, core = self._make_client(tmp_path)
+        token = self._get_session(client)
+        core.sender = MagicMock()
+        with client.websocket_connect(f"/ws?token={token}") as ws:
+            ws.send_text(json.dumps({
+                "type": "send",
+                "chat_identifier": "unknown-chat-id",
+                "chat_style": 45,
+                "text": "should be ignored",
+            }))
+        core.sender.send_text.assert_not_called()
+
+    def test_ws_oversized_data_ignored(self, tmp_path):
+        """Lines 681-682: oversized raw data is skipped."""
+        client, core = self._make_client(tmp_path)
+        token = self._get_session(client)
+        core.sender = MagicMock()
+        # Send data larger than max_msg_len * 2
+        huge = "x" * 25000
+        with client.websocket_connect(f"/ws?token={token}") as ws:
+            ws.send_text(huge)
+        core.sender.send_text.assert_not_called()
+
+    def test_ws_empty_text_not_sent(self, tmp_path):
+        """Line 693: empty text doesn't trigger send."""
+        client, core = self._make_client(tmp_path)
+        token = self._get_session(client)
+        core.sender = MagicMock()
+        with client.websocket_connect(f"/ws?token={token}") as ws:
+            ws.send_text(json.dumps({
+                "type": "send",
+                "chat_identifier": "+15551234567",
+                "chat_style": 45,
+                "text": "",
+            }))
+        core.sender.send_text.assert_not_called()
+
+
 class TestNoPasswordMode:
     def test_login_redirects_when_no_password(self, tmp_path):
         from web_server import create_app
