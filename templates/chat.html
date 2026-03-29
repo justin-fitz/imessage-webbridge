@@ -684,6 +684,11 @@ function connectWS() {
       if (data.chat_identifier === state.chatId) {
         updateLastSentStatus(data.status);
       }
+    } else if (data.type === 'read_sync') {
+      // Message read on iPhone/Messages.app — clear unread badge
+      delete state.unread[data.chat_identifier];
+      updateUnreadBadge(data.chat_identifier);
+      updateTitle();
     }
   };
 }

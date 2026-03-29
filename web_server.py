@@ -109,6 +109,7 @@ class StatusPoller:
         self.manager = manager
         self.interval = interval
         self._status_cache: dict[int, str] = {}
+        self._read_cache: dict[int, bool] = {}
 
     async def poll_loop(self):
         while True:
@@ -159,6 +160,45 @@ class StatusPoller:
         if len(self._status_cache) > 100:
             keep = {row["ROWID"] for row in rows}
             self._status_cache = {k: v for k, v in self._status_cache.items() if k in keep}
+
+        # Check for incoming messages read on other devices (iPhone, Messages.app)
+        await self._check_read_sync(conn_path=self.db_path)
+
+    async def _check_read_sync(self, conn_path: str):
+        conn = sqlite3.connect(conn_path)
+        conn.execute("PRAGMA query_only = ON")
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT m.ROWID, m.is_read, c.chat_identifier
+            FROM message m
+            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            JOIN chat c ON cmj.chat_id = c.ROWID
+            WHERE m.is_from_me = 0
+              AND m.item_type = 0
+              AND m.associated_message_type = 0
+            ORDER BY m.ROWID DESC
+            LIMIT 50
+        """).fetchall()
+        conn.close()
+
+        chats_now_read = set()
+        for row in rows:
+            rid = row["ROWID"]
+            is_read = bool(row["is_read"])
+            old = self._read_cache.get(rid)
+            if old is not None and not old and is_read:
+                chats_now_read.add(row["chat_identifier"])
+            self._read_cache[rid] = is_read
+
+        for chat_id in chats_now_read:
+            await self.manager.broadcast({
+                "type": "read_sync",
+                "chat_identifier": chat_id,
+            })
+
+        if len(self._read_cache) > 200:
+            keep = {row["ROWID"] for row in rows}
+            self._read_cache = {k: v for k, v in self._read_cache.items() if k in keep}
 
 
 class WebHandler:

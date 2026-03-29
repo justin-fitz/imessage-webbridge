@@ -34,7 +34,7 @@ def _create_test_chatdb(path):
             item_type INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
             associated_message_guid TEXT,
             attributedBody BLOB, date_delivered INTEGER DEFAULT 0, date_read INTEGER DEFAULT 0,
-            thread_originator_guid TEXT
+            thread_originator_guid TEXT, is_read INTEGER DEFAULT 0
         );
         CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
         CREATE TABLE attachment (
