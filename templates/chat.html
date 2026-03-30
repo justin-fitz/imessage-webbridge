@@ -180,6 +180,7 @@
     gap: 6px;
     align-self: flex-start;
     max-width: 70%;
+    position: relative;
   }
 
   .msg-group-wrap .msg {
@@ -265,6 +266,72 @@
   .msg.from-me .msg-reply { border-left-color: rgba(255,255,255,0.4); color: rgba(255,255,255,0.6); }
   .msg-reply .reply-sender { font-weight: 600; color: #ccc; }
   .msg.from-me .msg-reply .reply-sender { color: rgba(255,255,255,0.8); }
+
+  /* Reply button on hover */
+  .msg-wrapper {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .msg-wrapper.from-me { align-items: flex-end; }
+  .msg-wrapper.from-them { align-items: flex-start; }
+
+  .reply-btn {
+    display: none;
+    position: absolute;
+    top: 4px;
+    background: #444;
+    border: none;
+    color: #ccc;
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 24px;
+    text-align: center;
+    z-index: 5;
+    padding: 0;
+  }
+
+  .msg-wrapper.from-me .reply-btn { left: -32px; }
+  .msg-wrapper.from-them .reply-btn { right: -32px; }
+  .msg-group-wrap .reply-btn { right: -32px; }
+
+  .msg-wrapper:hover .reply-btn,
+  .msg-group-wrap:hover > .reply-btn { display: block; }
+  .reply-btn:hover { background: #555; color: #fff; }
+
+  /* Reply preview above compose */
+  #reply-preview {
+    display: none;
+    padding: 8px 16px;
+    background: #2a2a2a;
+    border-top: 1px solid #333;
+    border-left: 3px solid #0b84fe;
+    margin: 0;
+    font-size: 13px;
+    color: #aaa;
+    align-items: center;
+    gap: 8px;
+  }
+
+  #reply-preview.active { display: flex; }
+  #reply-preview-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #reply-preview-text .reply-sender { font-weight: 600; color: #ccc; margin-right: 6px; }
+
+  #reply-cancel {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 18px;
+    cursor: pointer;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+
+  #reply-cancel:hover { color: #fff; }
 
   .msg-reactions {
     display: flex;
@@ -613,6 +680,10 @@
   </div>
   <div id="empty-state">Select a conversation to start</div>
   <div id="messages" style="display:none"></div>
+  <div id="reply-preview">
+    <div id="reply-preview-text"></div>
+    <button id="reply-cancel">&times;</button>
+  </div>
   <div id="compose" style="display:none">
     <input type="text" id="msg-input" placeholder="iMessage" autocomplete="off">
     <button id="send-btn" disabled>Send</button>
@@ -629,6 +700,7 @@ const state = {
   msgOffset: 0,
   loadingMore: false,
   hasMore: true,
+  replyTo: null,  // { sender, text, is_from_me }
 };
 
 // --- WebSocket ---
@@ -745,6 +817,7 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   document.getElementById('new-msg-header').style.display = 'none';
 
   state.chatId = item.dataset.chatId;
+  clearReplyTo();
 
   // Clear unread for this chat
   delete state.unread[state.chatId];
@@ -789,6 +862,23 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 });
 
+// --- Reply ---
+function setReplyTo(reply) {
+  state.replyTo = reply;
+  const preview = document.getElementById('reply-preview');
+  const previewText = document.getElementById('reply-preview-text');
+  previewText.innerHTML = `<span class="reply-sender">${escapeHtml(reply.sender)}</span>${escapeHtml(reply.text).substring(0, 100)}`;
+  preview.classList.add('active');
+  document.getElementById('msg-input').focus();
+}
+
+function clearReplyTo() {
+  state.replyTo = null;
+  document.getElementById('reply-preview').classList.remove('active');
+}
+
+document.getElementById('reply-cancel').addEventListener('click', clearReplyTo);
+
 // --- Send ---
 async function sendMessage() {
   const input = document.getElementById('msg-input');
@@ -816,15 +906,24 @@ async function sendMessage() {
 
   if (!state.chatId || !state.ws) return;
 
+  let sendText = text;
+  const replyContext = state.replyTo;
+  if (replyContext) {
+    const quotedSender = replyContext.sender;
+    const quotedText = replyContext.text.substring(0, 100);
+    sendText = `"${quotedText}"\n— ${quotedSender}\n\n${text}`;
+    clearReplyTo();
+  }
+
   state.ws.send(JSON.stringify({
     type: 'send',
     chat_identifier: state.chatId,
     chat_style: state.chatStyle,
-    text: text,
+    text: sendText,
   }));
 
   appendMessage({
-    text: text,
+    text: sendText,
     is_from_me: true,
     sender_id: 'me',
     timestamp: new Date().toISOString(),
@@ -850,6 +949,7 @@ function refreshChatList(chats) {
 document.getElementById('send-btn').addEventListener('click', sendMessage);
 document.getElementById('msg-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') sendMessage();
+  if (e.key === 'Escape') clearReplyTo();
 });
 
 // --- Render ---
@@ -936,6 +1036,20 @@ function createMessageElement(msg, showAvatar) {
 
   msgDiv.innerHTML = html;
 
+  // Reply button
+  const replyBtn = document.createElement('button');
+  replyBtn.className = 'reply-btn';
+  replyBtn.innerHTML = '&#8617;';
+  replyBtn.title = 'Reply';
+  replyBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setReplyTo({
+      sender: msg.is_from_me ? 'You' : (msg.sender_id || 'Unknown'),
+      text: msg.text || '(attachment)',
+      is_from_me: msg.is_from_me,
+    });
+  });
+
   // Wrap in avatar row for group chats (from others only)
   if (isGroup && fromThem) {
     const wrap = document.createElement('div');
@@ -947,10 +1061,16 @@ function createMessageElement(msg, showAvatar) {
     avatar.style.background = senderColor(name);
     wrap.appendChild(avatar);
     wrap.appendChild(msgDiv);
+    wrap.appendChild(replyBtn);
     return wrap;
   }
 
-  return msgDiv;
+  // Wrap non-group messages for reply button positioning
+  const wrapper = document.createElement('div');
+  wrapper.className = `msg-wrapper ${msg.is_from_me ? 'from-me' : 'from-them'}`;
+  wrapper.appendChild(msgDiv);
+  wrapper.appendChild(replyBtn);
+  return wrapper;
 }
 
 function appendMessage(msg) {
