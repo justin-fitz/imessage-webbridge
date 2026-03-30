@@ -787,6 +787,7 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   });
   showLastStatus();
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  document.getElementById('msg-input').focus();
 });
 
 // --- Send ---
@@ -1161,7 +1162,10 @@ function stopFlash() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) stopFlash();
 });
-window.addEventListener('focus', stopFlash);
+window.addEventListener('focus', () => {
+  stopFlash();
+  if (state.chatId) document.getElementById('msg-input').focus();
+});
 
 // --- Browser notifications ---
 function showNotification(senderName, text) {
