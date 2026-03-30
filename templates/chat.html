@@ -180,6 +180,7 @@
     gap: 6px;
     align-self: flex-start;
     max-width: 70%;
+    position: relative;
   }
 
   .msg-group-wrap .msg {
@@ -268,20 +269,18 @@
 
   /* Reply button on hover */
   .msg-wrapper {
+    position: relative;
     display: flex;
-    align-items: center;
-    gap: 6px;
+    flex-direction: column;
   }
 
-  .msg-wrapper.from-me { align-self: flex-end; flex-direction: row-reverse; }
-  .msg-wrapper.from-them { align-self: flex-start; }
-
-  .msg-wrapper .msg { max-width: none; }
-  .msg-wrapper.from-me,
-  .msg-wrapper.from-them { max-width: 70%; }
+  .msg-wrapper.from-me { align-items: flex-end; }
+  .msg-wrapper.from-them { align-items: flex-start; }
 
   .reply-btn {
     display: none;
+    position: absolute;
+    top: 4px;
     background: #444;
     border: none;
     color: #ccc;
@@ -292,12 +291,16 @@
     font-size: 14px;
     line-height: 24px;
     text-align: center;
+    z-index: 5;
     padding: 0;
-    flex-shrink: 0;
   }
 
+  .msg-wrapper.from-me .reply-btn { left: -32px; }
+  .msg-wrapper.from-them .reply-btn { right: -32px; }
+  .msg-group-wrap .reply-btn { right: -32px; }
+
   .msg-wrapper:hover .reply-btn,
-  .msg-group-wrap:hover > .reply-btn { display: flex; align-items: center; justify-content: center; }
+  .msg-group-wrap:hover > .reply-btn { display: block; }
   .reply-btn:hover { background: #555; color: #fff; }
 
   /* Reply preview above compose */
