@@ -217,6 +217,14 @@
     flex-shrink: 0;
   }
 
+  .date-separator {
+    text-align: center;
+    font-size: 11px;
+    color: #888;
+    padding: 12px 0 4px;
+    font-weight: 600;
+  }
+
   .msg.from-me .msg-time { color: rgba(255,255,255,0.6); }
 
   .msg-status {
@@ -304,7 +312,7 @@
     gap: 8px;
   }
 
-  #compose input {
+  #compose textarea {
     flex: 1;
     padding: 10px 14px;
     border: 1px solid #444;
@@ -312,10 +320,15 @@
     background: #2a2a2a;
     color: #e0e0e0;
     font-size: 14px;
+    font-family: inherit;
     outline: none;
+    resize: none;
+    overflow-y: hidden;
+    max-height: 150px;
+    line-height: 1.4;
   }
 
-  #compose input:focus { border-color: #0b84fe; }
+  #compose textarea:focus { border-color: #0b84fe; }
 
   #compose button {
     padding: 10px 20px;
@@ -614,7 +627,7 @@
   <div id="empty-state">Select a conversation to start</div>
   <div id="messages" style="display:none"></div>
   <div id="compose" style="display:none">
-    <input type="text" id="msg-input" placeholder="iMessage" autocomplete="off">
+    <textarea id="msg-input" placeholder="iMessage" autocomplete="off" rows="1"></textarea>
     <button id="send-btn" disabled>Send</button>
   </div>
 </div>
@@ -625,6 +638,7 @@ const state = {
   chatStyle: 45,
   chatName: '',
   ws: null,
+  drafts: {}, // chat_identifier -> unsent text
   unread: {},  // chat_identifier -> count
   msgOffset: 0,
   loadingMore: false,
@@ -641,6 +655,7 @@ function connectWS() {
   state.ws.onopen = () => {
     document.getElementById('status-dot').className = 'dot connected';
     document.getElementById('status-text').textContent = 'Connected';
+    state.lastPong = Date.now();
   };
 
   state.ws.onclose = (event) => {
@@ -691,6 +706,63 @@ function connectWS() {
       updateTitle();
     }
   };
+}
+
+// Detect wake from sleep and refresh stale connections
+let lastHeartbeat = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  // If interval drifted by 10s+, machine likely slept
+  if (now - lastHeartbeat > 15000) {
+    // Force close stale socket so it reconnects
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+      state.ws.close();
+    }
+    // Reload current chat to catch missed messages
+    if (state.chatId) {
+      reloadCurrentChat();
+    }
+    // Refresh sidebar
+    fetch('/api/chats').then(r => r.ok ? r.json() : null).then(chats => {
+      if (chats) refreshChatList(chats);
+    });
+  }
+  lastHeartbeat = now;
+}, 5000);
+
+async function reloadCurrentChat() {
+  if (!state.chatId) return;
+  const messagesEl = document.getElementById('messages');
+  const resp = await fetch(`/api/chats/${encodeURIComponent(state.chatId)}/messages`);
+  if (!resp.ok) return;
+  const messages = await resp.json();
+  state.msgOffset = messages.length;
+  state.hasMore = messages.length >= 100;
+  messagesEl.innerHTML = '';
+  let prevSender = null;
+  let prevDate = null;
+  messages.forEach(msg => {
+    if (msg.timestamp) {
+      const msgDate = new Date(msg.timestamp).toDateString();
+      if (msgDate !== prevDate) {
+        messagesEl.appendChild(createDateSeparator(msg.timestamp));
+        prevDate = msgDate;
+      }
+    }
+    let showAvatar = true;
+    if (state.chatStyle === 43 && !msg.is_from_me) {
+      if (prevSender === (msg.sender_id || '')) showAvatar = false;
+      prevSender = msg.sender_id || '';
+    } else {
+      prevSender = msg.is_from_me ? '__me__' : null;
+    }
+    messagesEl.appendChild(createMessageElement(msg, showAvatar));
+  });
+  showLastStatus();
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  messagesEl.querySelectorAll('img, video').forEach(el => {
+    el.addEventListener('load', () => { messagesEl.scrollTop = messagesEl.scrollHeight; }, { once: true });
+  });
 }
 
 function updateSidebarPreview(data) {
@@ -744,6 +816,14 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   item.classList.add('active');
   document.getElementById('new-msg-header').style.display = 'none';
 
+  // Save draft from previous chat
+  const msgInput = document.getElementById('msg-input');
+  if (state.chatId) {
+    const draft = msgInput.value;
+    if (draft) state.drafts[state.chatId] = draft;
+    else delete state.drafts[state.chatId];
+  }
+
   state.chatId = item.dataset.chatId;
 
   // Clear unread for this chat
@@ -787,7 +867,15 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   });
   showLastStatus();
   messagesEl.scrollTop = messagesEl.scrollHeight;
-  document.getElementById('msg-input').focus();
+  // Re-scroll after images/media finish loading
+  messagesEl.querySelectorAll('img, video').forEach(el => {
+    el.addEventListener('load', () => { messagesEl.scrollTop = messagesEl.scrollHeight; }, { once: true });
+  });
+  // Restore draft for this chat
+  msgInput.value = state.drafts[state.chatId] || '';
+  msgInput.style.height = 'auto';
+  if (msgInput.value) msgInput.style.height = Math.min(msgInput.scrollHeight, 150) + 'px';
+  msgInput.focus();
 });
 
 // --- Send ---
@@ -807,6 +895,7 @@ async function sendMessage() {
     if (resp.ok) {
       appendMessage({ text, is_from_me: true, sender_id: 'me', timestamp: new Date().toISOString() });
       input.value = '';
+      input.style.height = 'auto';
       // Hide compose header, refresh sidebar
       document.getElementById('new-msg-header').style.display = 'none';
       const chatsResp = await fetch('/api/chats');
@@ -832,6 +921,8 @@ async function sendMessage() {
   });
 
   input.value = '';
+  input.style.height = 'auto';
+  delete state.drafts[state.chatId];
 }
 
 function refreshChatList(chats) {
@@ -850,7 +941,14 @@ function refreshChatList(chats) {
 
 document.getElementById('send-btn').addEventListener('click', sendMessage);
 document.getElementById('msg-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') sendMessage();
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+document.getElementById('msg-input').addEventListener('input', function () {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 150) + 'px';
 });
 
 // --- Render ---
@@ -873,6 +971,42 @@ function senderInitials(name) {
   return name.substring(0, 2).toUpperCase();
 }
 
+function formatMsgTime(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (isToday) return time;
+  if (isYesterday) return `Yesterday ${time}`;
+  // Same year: "Mon, Mar 5"
+  if (d.getFullYear() === now.getFullYear()) {
+    return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) + ' ' + time;
+  }
+  return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) + ' ' + time;
+}
+
+function dateSeparatorLabel(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return 'Today';
+  const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  if (d.getFullYear() === now.getFullYear()) {
+    return d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+  }
+  return d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+function createDateSeparator(ts) {
+  const div = document.createElement('div');
+  div.className = 'date-separator';
+  div.dataset.date = new Date(ts).toDateString();
+  div.textContent = dateSeparatorLabel(ts);
+  return div;
+}
+
 function createMessageElement(msg, showAvatar) {
   const isGroup = state.chatStyle === 43;
   const fromThem = !msg.is_from_me;
@@ -893,7 +1027,7 @@ function createMessageElement(msg, showAvatar) {
   }
 
   const timeHtml = msg.timestamp
-    ? `<span class="msg-time">${new Date(msg.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>`
+    ? `<span class="msg-time">${formatMsgTime(msg.timestamp)}</span>`
     : '';
 
   if (msg.text) {
@@ -956,6 +1090,17 @@ function createMessageElement(msg, showAvatar) {
 
 function appendMessage(msg) {
   const messagesEl = document.getElementById('messages');
+  // Insert date separator if this message is on a different day than the last
+  if (msg.timestamp) {
+    const msgDate = new Date(msg.timestamp).toDateString();
+    const lastSep = messagesEl.querySelector('.date-separator:last-of-type');
+    const lastSepDate = lastSep ? lastSep.dataset.date : null;
+    if (msgDate !== lastSepDate) {
+      const sep = createDateSeparator(msg.timestamp);
+      sep.dataset.date = msgDate;
+      messagesEl.appendChild(sep);
+    }
+  }
   // Determine if avatar should show (first msg from this sender in a run)
   const lastEl = messagesEl.lastElementChild;
   let showAvatar = true;
@@ -1031,7 +1176,17 @@ document.getElementById('messages').addEventListener('scroll', async function() 
   // Prepend older messages at the top
   const fragment = document.createDocumentFragment();
   let prevSender = null;
+  let prevDate = null;
   older.forEach(msg => {
+    if (msg.timestamp) {
+      const msgDate = new Date(msg.timestamp).toDateString();
+      if (msgDate !== prevDate) {
+        const sep = createDateSeparator(msg.timestamp);
+        sep.dataset.date = msgDate;
+        fragment.appendChild(sep);
+        prevDate = msgDate;
+      }
+    }
     let showAvatar = true;
     if (state.chatStyle === 43 && !msg.is_from_me) {
       if (prevSender === (msg.sender_id || '')) showAvatar = false;
@@ -1042,6 +1197,11 @@ document.getElementById('messages').addEventListener('scroll', async function() 
     const div = createMessageElement(msg, showAvatar);
     fragment.appendChild(div);
   });
+  // Remove duplicate date separator at boundary
+  const existingFirstSep = this.firstElementChild;
+  if (existingFirstSep && existingFirstSep.classList.contains('date-separator') && prevDate === existingFirstSep.dataset.date) {
+    existingFirstSep.remove();
+  }
   this.insertBefore(fragment, this.firstChild);
 
   // Restore scroll position so it doesn't jump
