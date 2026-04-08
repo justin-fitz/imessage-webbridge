@@ -1093,7 +1093,8 @@ function appendMessage(msg) {
   // Insert date separator if this message is on a different day than the last
   if (msg.timestamp) {
     const msgDate = new Date(msg.timestamp).toDateString();
-    const lastSep = messagesEl.querySelector('.date-separator:last-of-type');
+    const seps = messagesEl.querySelectorAll('.date-separator');
+    const lastSep = seps.length ? seps[seps.length - 1] : null;
     const lastSepDate = lastSep ? lastSep.dataset.date : null;
     if (msgDate !== lastSepDate) {
       const sep = createDateSeparator(msg.timestamp);
