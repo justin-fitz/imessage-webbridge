@@ -294,8 +294,8 @@ def _prune_attachments():
 
 
 _TAPBACK_MAP = {
-    2000: "\u2764\ufe0f", 2001: "\ud83d\udc4d", 2002: "\ud83d\udc4e",
-    2003: "\ud83d\ude02", 2004: "\u203c\ufe0f", 2005: "\u2753",
+    2000: "\u2764\ufe0f", 2001: "\U0001f44d", 2002: "\U0001f44e",
+    2003: "\U0001f602", 2004: "\u203c\ufe0f", 2005: "\u2753",
 }
 # Types 3000-3005 remove the corresponding 2000-2005 reaction
 _TAPBACK_REMOVE = {3000, 3001, 3002, 3003, 3004, 3005}
