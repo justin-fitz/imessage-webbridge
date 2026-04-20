@@ -36,6 +36,9 @@ class Config:
     web: WebConfig
 
 
+_INSECURE_PASSWORDS = {"", "CHANGE_ME", "password", "admin", "imessage"}
+
+
 def load_config(path: str) -> Config:
     with open(path) as f:
         raw = yaml.safe_load(f)
@@ -65,4 +68,18 @@ def load_config(path: str) -> Config:
         login_rate_window=w.get("login_rate_window", 300),
     )
 
+    _validate_web_config(web_cfg)
+
     return Config(imessage=imessage_cfg, app=app_cfg, web=web_cfg)
+
+
+def _validate_web_config(web: WebConfig) -> None:
+    if web.password in _INSECURE_PASSWORDS:
+        raise ValueError(
+            "web.password is unset or using a placeholder value. "
+            "Set a strong password in config.yaml before starting the server."
+        )
+    if len(web.password) < 8:
+        raise ValueError("web.password must be at least 8 characters.")
+    if not any(c.isalpha() for c in web.password) or not any(c.isdigit() for c in web.password):
+        raise ValueError("web.password must contain both letters and numbers.")
