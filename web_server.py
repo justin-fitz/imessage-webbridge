@@ -37,6 +37,26 @@ _SESSION_TTL = 86400  # 24 hours
 _session_db: sqlite3.Connection | None = None
 _login_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
 
+# Outbound-send rate limit (per session). Guards against a compromised session
+# being used to blast iMessages at contacts.
+_SEND_RATE_MAX = 20           # sends per window
+_SEND_RATE_WINDOW = 60        # seconds
+_send_attempts: dict[str, list[float]] = {}
+
+
+def _check_send_rate(session: str) -> bool:
+    """Return True if the send is allowed, False if rate-limited."""
+    if not session:
+        return True
+    now = time.time()
+    attempts = [t for t in _send_attempts.get(session, []) if now - t < _SEND_RATE_WINDOW]
+    if len(attempts) >= _SEND_RATE_MAX:
+        _send_attempts[session] = attempts
+        return False
+    attempts.append(now)
+    _send_attempts[session] = attempts
+    return True
+
 
 def _init_session_db(db_path: str):
     global _session_db
@@ -551,6 +571,14 @@ def create_app(core: AppCore) -> FastAPI:
                         headers={"Service-Worker-Allowed": "/"})
 
     _init_session_db(core.config.app.state_db)
+    # Temp dir can contain decrypted message attachments (HEIC→JPEG conversions).
+    # Restrict to owner-only so other local users can't read them.
+    _temp_dir = core.config.app.temp_dir
+    os.makedirs(_temp_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(_temp_dir, 0o700)
+    except OSError:
+        pass
     manager = ConnectionManager(max_connections=core.config.web.max_connections)
     contact_store = ContactStore()
     web_handler = WebHandler(manager, contact_store.contacts)
@@ -630,7 +658,7 @@ def create_app(core: AppCore) -> FastAPI:
         if password and not _valid_session(session):
             return RedirectResponse("/login", status_code=303)
         chats = get_recent_chats(core.config.imessage.db_path, contact_store.contacts)
-        return templates.TemplateResponse(request, "chat.html", {"chats": chats, "ws_token": session or ""})
+        return templates.TemplateResponse(request, "chat.html", {"chats": chats})
 
     @app.get("/api/chats")
     async def api_chats(session: str | None = Cookie(default=None, alias="session")):
@@ -664,6 +692,8 @@ def create_app(core: AppCore) -> FastAPI:
     async def send_new_message(request: Request, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
+        if not _check_send_rate(session or ""):
+            raise HTTPException(status_code=429, detail="Send rate limit exceeded; slow down.")
         body = await request.json()
         recipients = body.get("recipients", [])
         text = body.get("text", "").strip()
@@ -712,7 +742,7 @@ def create_app(core: AppCore) -> FastAPI:
         if ext in (".heic", ".heif"):
             jpeg_path = os.path.join(core.config.app.temp_dir, f"{token}.jpg")
             if not os.path.exists(jpeg_path):
-                os.makedirs(core.config.app.temp_dir, exist_ok=True)
+                os.makedirs(core.config.app.temp_dir, mode=0o700, exist_ok=True)
                 import subprocess
                 subprocess.run(
                     ["sips", "-s", "format", "jpeg", "-s", "formatOptions", "80", filepath, "--out", jpeg_path],
@@ -725,21 +755,21 @@ def create_app(core: AppCore) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
-        # Authenticate via session token in query param
-        if password:
-            token = ws.query_params.get("token", "")
-            if not _valid_session(token):
-                await ws.accept()
-                await ws.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
-                await ws.close(code=1008)
-                return
-
-        # Check Origin header
+        # Check Origin header before doing anything else (defense against
+        # cross-origin WS upgrades that could ride on the session cookie).
         origin = ws.headers.get("origin", "")
         if allowed_origins and origin and origin not in allowed_origins:
-            await ws.accept()
             await ws.close(code=1008)
             return
+
+        # Authenticate via the session cookie — browsers send it automatically
+        # on same-origin WS upgrades, and cookies carry HttpOnly/SameSite/Secure
+        # flags that query-string tokens don't.
+        session_token = ws.cookies.get("session", "")
+        if password:
+            if not _valid_session(session_token):
+                await ws.close(code=1008)
+                return
 
         connected = await manager.connect(ws)
         if not connected:
@@ -756,6 +786,9 @@ def create_app(core: AppCore) -> FastAPI:
                     text = msg.get("text", "")
 
                     if chat_id not in known_chats:
+                        continue
+                    if not _check_send_rate(session_token):
+                        await ws.send_text(json.dumps({"type": "error", "message": "Send rate limit exceeded"}))
                         continue
                     if len(text) > max_msg_len:
                         text = text[:max_msg_len]

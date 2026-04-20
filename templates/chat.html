@@ -559,7 +559,6 @@
 </head>
 <body>
 
-<input type="hidden" id="ws-token" value="{{ ws_token }}">
 <div id="sidebar">
   <div id="sidebar-header"><span><img src="/static/logo2.svg" alt="" width="28" height="28" style="vertical-align:middle;margin-right:8px;border-radius:6px">iMessage Web Bridge</span><button id="new-msg-btn" title="New Message"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M14 2L7 9M14 2l-4 12-3-5-5-3z"/></svg></button></div>
   <div id="chat-list">
@@ -648,9 +647,7 @@ const state = {
 // --- WebSocket ---
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsToken = document.getElementById('ws-token')?.value || '';
-  const tokenParam = wsToken ? `?token=${encodeURIComponent(wsToken)}` : '';
-  state.ws = new WebSocket(`${proto}//${location.host}/ws${tokenParam}`);
+  state.ws = new WebSocket(`${proto}//${location.host}/ws`);
 
   state.ws.onopen = () => {
     document.getElementById('status-dot').className = 'dot connected';

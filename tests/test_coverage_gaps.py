@@ -974,35 +974,37 @@ class TestWebSocketEndpoint:
         return _create_session()
 
     def test_ws_auth_failure(self, tmp_path):
-        """Lines 660-666: WebSocket rejected without valid token."""
+        """WebSocket rejected without valid session cookie."""
+        from starlette.websockets import WebSocketDisconnect
         client, _ = self._make_client(tmp_path)
-        with client.websocket_connect("/ws?token=invalid") as ws:
-            data = json.loads(ws.receive_text())
-            assert data["type"] == "error"
-            assert data["message"] == "Unauthorized"
+        client.cookies.set("session", "invalid")
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_text()
 
     def test_ws_auth_success_and_send(self, tmp_path):
-        """Lines 678-694: WebSocket connect and send a message."""
+        """WebSocket connect via cookie auth and send a message."""
         client, core = self._make_client(tmp_path)
         token = self._get_session(client)
+        client.cookies.set("session", token)
         core.sender = MagicMock()
         core.sender.send_text.return_value = True
-        with client.websocket_connect(f"/ws?token={token}") as ws:
+        with client.websocket_connect("/ws") as ws:
             ws.send_text(json.dumps({
                 "type": "send",
                 "chat_identifier": "+15551234567",
                 "chat_style": 45,
                 "text": "hello from ws",
             }))
-            # Give it a moment then close
         core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello from ws")
 
     def test_ws_unknown_chat_ignored(self, tmp_path):
-        """Line 689-690: message to unknown chat is ignored."""
+        """Message to unknown chat is ignored."""
         client, core = self._make_client(tmp_path)
         token = self._get_session(client)
+        client.cookies.set("session", token)
         core.sender = MagicMock()
-        with client.websocket_connect(f"/ws?token={token}") as ws:
+        with client.websocket_connect("/ws") as ws:
             ws.send_text(json.dumps({
                 "type": "send",
                 "chat_identifier": "unknown-chat-id",
@@ -1012,22 +1014,23 @@ class TestWebSocketEndpoint:
         core.sender.send_text.assert_not_called()
 
     def test_ws_oversized_data_ignored(self, tmp_path):
-        """Lines 681-682: oversized raw data is skipped."""
+        """Oversized raw data is skipped."""
         client, core = self._make_client(tmp_path)
         token = self._get_session(client)
+        client.cookies.set("session", token)
         core.sender = MagicMock()
-        # Send data larger than max_msg_len * 2
         huge = "x" * 25000
-        with client.websocket_connect(f"/ws?token={token}") as ws:
+        with client.websocket_connect("/ws") as ws:
             ws.send_text(huge)
         core.sender.send_text.assert_not_called()
 
     def test_ws_empty_text_not_sent(self, tmp_path):
-        """Line 693: empty text doesn't trigger send."""
+        """Empty text doesn't trigger send."""
         client, core = self._make_client(tmp_path)
         token = self._get_session(client)
+        client.cookies.set("session", token)
         core.sender = MagicMock()
-        with client.websocket_connect(f"/ws?token={token}") as ws:
+        with client.websocket_connect("/ws") as ws:
             ws.send_text(json.dumps({
                 "type": "send",
                 "chat_identifier": "+15551234567",
