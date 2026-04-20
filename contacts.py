@@ -123,3 +123,55 @@ def get_group_members(db_path: str, chat_identifier: str) -> list[str]:
         return [row["id"] for row in rows]
     except Exception:
         return []
+
+
+def _normalize_identifier(identifier: str) -> str:
+    """Normalize a phone number or email for set comparison."""
+    if "@" in identifier:
+        return identifier.strip().lower()
+    return _normalize_phone(identifier)
+
+
+def find_group_chat(db_path: str, participant_ids: list[str]) -> tuple[str, int] | None:
+    """Find an existing group chat whose participants exactly match the given set.
+
+    Returns (chat_identifier, style) or None.
+    """
+    target = {_normalize_identifier(p) for p in participant_ids if p}
+    if len(target) < 2:
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT c.ROWID as chat_rowid, c.chat_identifier, c.style,
+                   MAX(m.date) as last_date, h.id as handle
+            FROM chat c
+            JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+            JOIN handle h ON chj.handle_id = h.ROWID
+            LEFT JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+            LEFT JOIN message m ON m.ROWID = cmj.message_id
+            WHERE c.style = 43
+            GROUP BY c.ROWID, h.id
+        """).fetchall()
+        conn.close()
+    except Exception:
+        return None
+
+    chats: dict[int, dict] = {}
+    for row in rows:
+        rowid = row["chat_rowid"]
+        entry = chats.setdefault(rowid, {
+            "chat_identifier": row["chat_identifier"],
+            "style": row["style"],
+            "last_date": row["last_date"] or 0,
+            "members": set(),
+        })
+        entry["members"].add(_normalize_identifier(row["handle"]))
+
+    # Prefer the most recently active chat among exact matches
+    candidates = [c for c in chats.values() if c["members"] == target]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda c: c["last_date"])
+    return (best["chat_identifier"], best["style"])

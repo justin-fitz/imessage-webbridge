@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app_core import AppCore
-from contacts import get_group_members, load_contacts, resolve_identifier, search_contacts
+from contacts import find_group_chat, get_group_members, load_contacts, resolve_identifier, search_contacts
 from imessage_reader import APPLE_EPOCH_OFFSET
 from models import ChatMessage
 
@@ -671,8 +671,17 @@ def create_app(core: AppCore) -> FastAPI:
             raise HTTPException(status_code=400, detail="recipients and text required")
         if len(text) > max_msg_len:
             text = text[:max_msg_len]
-        for recipient in recipients:
-            core.send_to_imessage(recipient, 45, text=text)
+        if len(recipients) > 1:
+            group = find_group_chat(core.config.imessage.db_path, recipients)
+            if not group:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No existing group chat matches these participants. Start the group from Messages.app first.",
+                )
+            chat_id, style = group
+            core.send_to_imessage(chat_id, style, text=text)
+        else:
+            core.send_to_imessage(recipients[0], 45, text=text)
         # Refresh known chats so WebSocket sending works for this chat going forward
         nonlocal known_chats
         known_chats = _get_known_chat_identifiers(core.config.imessage.db_path)
