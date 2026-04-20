@@ -84,8 +84,11 @@ def test_send_file_1on1(mock_run):
     result = sender.send_file("+15551234567", 45, "/tmp/photo.jpg")
     assert result is True
     script = mock_run.call_args[0][0][2]
-    assert 'POSIX file "/tmp/photo.jpg"' in script
+    # File path is passed via env var, not interpolated into the script.
+    assert "/tmp/photo.jpg" not in script
+    assert 'system attribute "IMSG_FILE"' in script
     assert 'buddy "+15551234567"' in script
+    assert mock_run.call_args[1]["env"]["IMSG_FILE"] == "/tmp/photo.jpg"
 
 
 @patch("imessage_sender.subprocess.run")
@@ -95,8 +98,23 @@ def test_send_file_group(mock_run):
     result = sender.send_file("abc999", 43, "/tmp/doc.pdf")
     assert result is True
     script = mock_run.call_args[0][0][2]
-    assert 'POSIX file "/tmp/doc.pdf"' in script
+    assert "/tmp/doc.pdf" not in script
+    assert 'system attribute "IMSG_FILE"' in script
     assert 'chat id "any;+;abc999"' in script
+    assert mock_run.call_args[1]["env"]["IMSG_FILE"] == "/tmp/doc.pdf"
+
+
+@patch("imessage_sender.subprocess.run")
+def test_send_file_path_injection_blocked(mock_run):
+    """Malicious file paths must not escape the AppleScript string."""
+    mock_run.return_value = MagicMock(returncode=0)
+    sender = IMessageSender()
+    evil = '/tmp/x.jpg" & do shell script "touch /tmp/pwn" & "'
+    result = sender.send_file("+15551234567", 45, evil)
+    assert result is True
+    script = mock_run.call_args[0][0][2]
+    assert evil not in script
+    assert "do shell script" not in script
 
 
 @patch("imessage_sender.subprocess.run")

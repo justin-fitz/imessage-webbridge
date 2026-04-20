@@ -43,14 +43,15 @@ end tell
 """.replace("%IDENTIFIER%", identifier)
             return self._run_applescript(script, env_text=text)
         else:
-            script = f"""
+            # Pass file path via env var to prevent AppleScript injection
+            script = """
 tell application "Messages"
     set targetService to (1st service whose service type is iMessage)
-    set targetBuddy to buddy "{identifier}" of targetService
-    send POSIX file "{file_path}" to targetBuddy
+    set targetBuddy to buddy "%IDENTIFIER%" of targetService
+    send (POSIX file (system attribute "IMSG_FILE")) to targetBuddy
 end tell
-"""
-            return self._run_applescript(script)
+""".replace("%IDENTIFIER%", identifier)
+            return self._run_applescript(script, env_file=file_path)
 
     def _send_to_group(self, chat_identifier: str, text: str | None = None, file_path: str | None = None) -> bool:
         chat_id = f"any;+;{chat_identifier}"
@@ -63,19 +64,21 @@ end tell
 """.replace("%CHAT_ID%", chat_id)
             return self._run_applescript(script, env_text=text)
         else:
-            script = f"""
+            script = """
 tell application "Messages"
-    set targetChat to chat id "{chat_id}"
-    send POSIX file "{file_path}" to targetChat
+    set targetChat to chat id "%CHAT_ID%"
+    send (POSIX file (system attribute "IMSG_FILE")) to targetChat
 end tell
-"""
-            return self._run_applescript(script)
+""".replace("%CHAT_ID%", chat_id)
+            return self._run_applescript(script, env_file=file_path)
 
     @staticmethod
-    def _run_applescript(script: str, env_text: str | None = None) -> bool:
+    def _run_applescript(script: str, env_text: str | None = None, env_file: str | None = None) -> bool:
         env = os.environ.copy()
         if env_text is not None:
             env["IMSG_TEXT"] = env_text
+        if env_file is not None:
+            env["IMSG_FILE"] = env_file
         result = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True,
