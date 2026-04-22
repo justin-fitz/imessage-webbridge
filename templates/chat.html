@@ -309,7 +309,35 @@
     border-top: 1px solid #333;
     background: #222;
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
+  }
+
+  #paste-preview {
+    width: 100%;
+    position: relative;
+    display: inline-block;
+  }
+  #paste-preview img {
+    max-height: 120px;
+    max-width: 200px;
+    border-radius: 8px;
+    border: 1px solid #444;
+  }
+  #paste-preview-remove {
+    position: absolute;
+    top: -6px;
+    left: 194px;
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: #ff3b30;
+    color: #fff;
+    border: none;
+    font-size: 14px;
+    line-height: 18px;
+    text-align: center;
+    cursor: pointer;
+    padding: 0;
   }
 
   #compose textarea {
@@ -626,6 +654,10 @@
   <div id="empty-state">Select a conversation to start</div>
   <div id="messages" style="display:none"></div>
   <div id="compose" style="display:none">
+    <div id="paste-preview" style="display:none">
+      <img id="paste-preview-img">
+      <button id="paste-preview-remove" title="Remove">&times;</button>
+    </div>
     <textarea id="msg-input" placeholder="iMessage" autocomplete="off" rows="1"></textarea>
     <button id="send-btn" disabled>Send</button>
   </div>
@@ -879,7 +911,7 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
 async function sendMessage() {
   const input = document.getElementById('msg-input');
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !pendingFile) return;
 
   // New message mode — send via API to new recipients
   if (!state.chatId && newMsgRecipients.length > 0) {
@@ -893,7 +925,7 @@ async function sendMessage() {
       appendMessage({ text, is_from_me: true, sender_id: 'me', timestamp: new Date().toISOString() });
       input.value = '';
       input.style.height = 'auto';
-      // Hide compose header, refresh sidebar
+      clearPastePreview();
       document.getElementById('new-msg-header').style.display = 'none';
       const chatsResp = await fetch('/api/chats');
       if (chatsResp.ok) refreshChatList(await chatsResp.json());
@@ -903,23 +935,48 @@ async function sendMessage() {
 
   if (!state.chatId || !state.ws) return;
 
-  state.ws.send(JSON.stringify({
+  // Upload pasted file first, then send via WS
+  let filePath = '';
+  if (pendingFile) {
+    const form = new FormData();
+    form.append('file', pendingFile);
+    try {
+      const resp = await fetch('/api/upload', { method: 'POST', body: form });
+      if (resp.ok) {
+        const data = await resp.json();
+        filePath = data.file_path;
+      }
+    } catch (e) {
+      console.error('Upload failed', e);
+    }
+  }
+
+  if (!text && !filePath) return;
+
+  const payload = {
     type: 'send',
     chat_identifier: state.chatId,
     chat_style: state.chatStyle,
-    text: text,
-  }));
+  };
+  if (text) payload.text = text;
+  if (filePath) payload.file_path = filePath;
+  state.ws.send(JSON.stringify(payload));
 
-  appendMessage({
-    text: text,
+  const msgData = {
     is_from_me: true,
     sender_id: 'me',
     timestamp: new Date().toISOString(),
-  });
-  updateSidebarPreview({ chat_identifier: state.chatId, text: text });
+  };
+  if (text) msgData.text = text;
+  if (pendingFile && pendingFile.type.startsWith('image/')) {
+    msgData.attachments = [{ url: URL.createObjectURL(pendingFile), mime_type: pendingFile.type, transfer_name: pendingFile.name }];
+  }
+  appendMessage(msgData);
+  updateSidebarPreview({ chat_identifier: state.chatId, text: text || '(image)' });
 
   input.value = '';
   input.style.height = 'auto';
+  clearPastePreview();
   delete state.drafts[state.chatId];
 }
 
@@ -947,6 +1004,49 @@ document.getElementById('msg-input').addEventListener('keydown', (e) => {
 document.getElementById('msg-input').addEventListener('input', function () {
   this.style.height = 'auto';
   this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+});
+
+// --- Paste-to-send ---
+let pendingFile = null;
+
+function showPastePreview(file) {
+  pendingFile = file;
+  const preview = document.getElementById('paste-preview');
+  const img = document.getElementById('paste-preview-img');
+  if (file.type.startsWith('image/')) {
+    img.src = URL.createObjectURL(file);
+    img.style.display = '';
+  } else {
+    img.style.display = 'none';
+  }
+  preview.style.display = '';
+  document.getElementById('send-btn').disabled = false;
+}
+
+function clearPastePreview() {
+  pendingFile = null;
+  const preview = document.getElementById('paste-preview');
+  const img = document.getElementById('paste-preview-img');
+  if (img.src) URL.revokeObjectURL(img.src);
+  img.src = '';
+  preview.style.display = 'none';
+}
+
+document.getElementById('paste-preview-remove').addEventListener('click', clearPastePreview);
+
+document.getElementById('msg-input').addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const file = item.getAsFile();
+      if (file) {
+        e.preventDefault();
+        showPastePreview(file);
+        return;
+      }
+    }
+  }
 });
 
 // --- Render ---

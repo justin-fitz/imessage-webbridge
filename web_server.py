@@ -7,7 +7,7 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 
-from fastapi import Cookie, FastAPI, Form, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Cookie, FastAPI, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -753,6 +753,30 @@ def create_app(core: AppCore) -> FastAPI:
 
         return FileResponse(filepath)
 
+    _UPLOAD_MAX = 25 * 1024 * 1024  # 25 MB
+    _UPLOAD_ALLOWED_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp",
+                             "image/heic", "image/heif", "image/tiff", "image/bmp",
+                             "video/mp4", "video/quicktime",
+                             "application/pdf"}
+
+    @app.post("/api/upload")
+    async def upload_file(file: UploadFile, session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        if file.content_type and file.content_type not in _UPLOAD_ALLOWED_TYPES:
+            raise HTTPException(status_code=400, detail=f"File type not allowed: {file.content_type}")
+        data = await file.read(_UPLOAD_MAX + 1)
+        if len(data) > _UPLOAD_MAX:
+            raise HTTPException(status_code=413, detail="File too large (25 MB max)")
+        ext = os.path.splitext(file.filename or "file")[1].lower() or ".png"
+        safe_name = f"{secrets.token_urlsafe(16)}{ext}"
+        dest = os.path.join(core.config.app.temp_dir, safe_name)
+        os.makedirs(core.config.app.temp_dir, mode=0o700, exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(data)
+        os.chmod(dest, 0o600)
+        return {"file_path": dest}
+
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
         # Check Origin header before doing anything else (defense against
@@ -784,14 +808,23 @@ def create_app(core: AppCore) -> FastAPI:
                     chat_id = msg.get("chat_identifier", "")
                     chat_style = msg.get("chat_style", 45)
                     text = msg.get("text", "")
+                    file_path = msg.get("file_path", "")
 
                     if chat_id not in known_chats:
                         continue
                     if not _check_send_rate(session_token):
                         await ws.send_text(json.dumps({"type": "error", "message": "Send rate limit exceeded"}))
                         continue
+                    # Validate file_path is inside the temp dir (prevent path traversal)
+                    if file_path:
+                        real = os.path.realpath(file_path)
+                        temp_real = os.path.realpath(core.config.app.temp_dir)
+                        if not real.startswith(temp_real + os.sep) or not os.path.isfile(real):
+                            file_path = ""
                     if len(text) > max_msg_len:
                         text = text[:max_msg_len]
+                    if file_path:
+                        core.send_to_imessage(chat_id, chat_style, file_path=file_path)
                     if text:
                         core.send_to_imessage(chat_id, chat_style, text=text)
         except WebSocketDisconnect:
