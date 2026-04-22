@@ -98,7 +98,13 @@ class IMessageReader:
 
     @staticmethod
     def _extract_attributed_text(ab: bytes) -> str | None:
-        """Extract plain text from NSAttributedString typedstream blob."""
+        """Extract plain text from NSAttributedString typedstream blob.
+
+        The typedstream stores the string after a ``\\x01+`` marker.
+        Short strings (< 128 bytes) use a single-byte length prefix.
+        Longer strings start with ``0x81`` followed by a 2-byte
+        little-endian length.
+        """
         parts = ab.split(b"NSString")
         if len(parts) < 2:
             return None
@@ -108,13 +114,15 @@ class IMessageReader:
             return None
         idx += 2
         length_byte = after[idx]
-        idx += 1
-        if length_byte & 0x80:
-            num_length_bytes = length_byte & 0x7F
-            length = int.from_bytes(after[idx : idx + num_length_bytes], "big")
-            idx += num_length_bytes
-        else:
+        if length_byte < 0x80:
             length = length_byte
+            idx += 1
+        elif length_byte == 0x81:
+            # 2-byte little-endian length
+            length = after[idx + 1] + after[idx + 2] * 256
+            idx += 3
+        else:
+            return None
         try:
             text = after[idx : idx + length].decode("utf-8")
             return text.lstrip("\x00") or None
