@@ -770,7 +770,7 @@ def create_app(core: AppCore) -> FastAPI:
             raise HTTPException(status_code=413, detail="File too large (25 MB max)")
         ext = os.path.splitext(file.filename or "file")[1].lower() or ".png"
         safe_name = f"{secrets.token_urlsafe(16)}{ext}"
-        dest = os.path.join(core.config.app.temp_dir, safe_name)
+        dest = os.path.abspath(os.path.join(core.config.app.temp_dir, safe_name))
         os.makedirs(core.config.app.temp_dir, mode=0o700, exist_ok=True)
         with open(dest, "wb") as f:
             f.write(data)
