@@ -253,19 +253,24 @@ class WebHandler:
 
 
 def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) -> list[dict]:
+    from imessage_reader import IMessageReader
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
         SELECT c.chat_identifier, c.display_name, c.style,
                MAX(m.date) as last_date,
-               (SELECT m2.text FROM message m2
-                JOIN chat_message_join cmj2 ON m2.ROWID = cmj2.message_id
-                WHERE cmj2.chat_id = c.ROWID
-                  AND m2.item_type = 0 AND m2.associated_message_type = 0
-                ORDER BY m2.ROWID DESC LIMIT 1) as last_text
+               last_msg.text as last_text,
+               last_msg.attributedBody as last_attributed_body,
+               last_msg.cache_has_attachments as last_has_attachments
         FROM chat c
         JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
         JOIN message m ON cmj.message_id = m.ROWID
+        LEFT JOIN message last_msg ON last_msg.ROWID = (
+            SELECT m2.ROWID FROM message m2
+            JOIN chat_message_join cmj2 ON m2.ROWID = cmj2.message_id
+            WHERE cmj2.chat_id = c.ROWID
+              AND m2.item_type = 0 AND m2.associated_message_type = 0
+            ORDER BY m2.ROWID DESC LIMIT 1)
         WHERE m.item_type = 0 AND m.associated_message_type = 0
         GROUP BY c.ROWID
         ORDER BY last_date DESC
@@ -284,11 +289,19 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
                 display_name = ", ".join(member_names)
             else:
                 display_name = resolve_identifier(row["chat_identifier"], contacts) or row["chat_identifier"]
+
+        last_text = row["last_text"]
+        if not last_text and row["last_attributed_body"]:
+            last_text = IMessageReader._extract_attributed_text(row["last_attributed_body"])
+        if not last_text and row["last_has_attachments"]:
+            last_text = "📎 Attachment"
+        last_text = (last_text or "")[:80]
+
         chats.append({
             "chat_identifier": row["chat_identifier"],
             "display_name": display_name,
             "style": style,
-            "last_text": (row["last_text"] or "")[:80],
+            "last_text": last_text,
         })
     return _sanitize(chats)
 
