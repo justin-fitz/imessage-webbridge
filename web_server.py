@@ -257,23 +257,22 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
+        WITH last_msgs AS (
+            SELECT cmj.chat_id AS chat_id, MAX(m.ROWID) AS last_rowid
+            FROM message m
+            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            WHERE m.item_type = 0 AND m.associated_message_type = 0
+            GROUP BY cmj.chat_id
+        )
         SELECT c.chat_identifier, c.display_name, c.style,
-               MAX(m.date) as last_date,
-               last_msg.text as last_text,
-               last_msg.attributedBody as last_attributed_body,
-               last_msg.cache_has_attachments as last_has_attachments
+               last_msg.date AS last_date,
+               last_msg.text AS last_text,
+               last_msg.attributedBody AS last_attributed_body,
+               last_msg.cache_has_attachments AS last_has_attachments
         FROM chat c
-        JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
-        JOIN message m ON cmj.message_id = m.ROWID
-        LEFT JOIN message last_msg ON last_msg.ROWID = (
-            SELECT m2.ROWID FROM message m2
-            JOIN chat_message_join cmj2 ON m2.ROWID = cmj2.message_id
-            WHERE cmj2.chat_id = c.ROWID
-              AND m2.item_type = 0 AND m2.associated_message_type = 0
-            ORDER BY m2.ROWID DESC LIMIT 1)
-        WHERE m.item_type = 0 AND m.associated_message_type = 0
-        GROUP BY c.ROWID
-        ORDER BY last_date DESC
+        JOIN last_msgs lm ON lm.chat_id = c.ROWID
+        JOIN message last_msg ON last_msg.ROWID = lm.last_rowid
+        ORDER BY last_msg.date DESC
         LIMIT ?
     """, (limit,)).fetchall()
     conn.close()
@@ -293,6 +292,9 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
         last_text = row["last_text"]
         if not last_text and row["last_attributed_body"]:
             last_text = IMessageReader._extract_attributed_text(row["last_attributed_body"])
+        # Strip the object-replacement char iMessage uses to mark embedded attachments
+        if last_text:
+            last_text = last_text.replace("￼", "").strip()
         if not last_text and row["last_has_attachments"]:
             last_text = "📎 Attachment"
         last_text = (last_text or "")[:80]
