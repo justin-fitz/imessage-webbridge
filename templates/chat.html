@@ -1518,7 +1518,23 @@ document.getElementById('contact-search').addEventListener('input', (e) => {
 document.getElementById('contact-results').addEventListener('click', (e) => {
   const item = e.target.closest('.contact-result');
   if (!item) return;
-  newMsgRecipients.push({ name: item.dataset.name, identifier: item.dataset.id });
+  const identifier = item.dataset.id;
+
+  // If this is the first recipient and an existing 1:1 chat exists with this contact,
+  // open it (with history) instead of starting a blank new-message composer.
+  if (newMsgRecipients.length === 0) {
+    const existingChat = document.querySelector(
+      `.chat-item[data-chat-id="${CSS.escape(identifier)}"]`
+    );
+    if (existingChat) {
+      document.getElementById('contact-search').value = '';
+      document.getElementById('contact-results').classList.remove('open');
+      existingChat.click();
+      return;
+    }
+  }
+
+  newMsgRecipients.push({ name: item.dataset.name, identifier });
   renderRecipients();
   document.getElementById('contact-search').value = '';
   document.getElementById('contact-results').classList.remove('open');
