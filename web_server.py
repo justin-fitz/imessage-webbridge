@@ -35,6 +35,7 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 _SESSION_TTL = 86400  # 24 hours
 _session_db: sqlite3.Connection | None = None
+_session_db_path: str | None = None
 _login_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
 
 # Outbound-send rate limit (per session). Guards against a compromised session
@@ -59,7 +60,8 @@ def _check_send_rate(session: str) -> bool:
 
 
 def _init_session_db(db_path: str):
-    global _session_db
+    global _session_db, _session_db_path
+    _session_db_path = db_path
     _session_db = sqlite3.connect(db_path, check_same_thread=False)
     _session_db.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
@@ -67,6 +69,10 @@ def _init_session_db(db_path: str):
             expiry REAL NOT NULL
         )
     """)
+    # chat_read_state was an earlier attempt at webapp-local read markers.
+    # Removed in favor of mirroring iMessage's is_read directly — the local
+    # markers diverged from the iPhone state and masked real unread counts.
+    _session_db.execute("DROP TABLE IF EXISTS chat_read_state")
     _session_db.execute("DELETE FROM sessions WHERE expiry < ?", (time.time(),))
     _session_db.commit()
 
@@ -130,6 +136,7 @@ class StatusPoller:
         self.interval = interval
         self._status_cache: dict[int, str] = {}
         self._read_cache: dict[int, bool] = {}
+        self._seeded = False
 
     async def poll_loop(self):
         while True:
@@ -170,7 +177,12 @@ class StatusPoller:
             old = self._status_cache.get(rid)
             if old != s:
                 self._status_cache[rid] = s
-                if old is not None:
+                # Suppress broadcasts during initial seed (avoids flooding clients
+                # with status updates for the backlog at daemon startup). After
+                # the first pass, broadcast on first sighting too — otherwise a
+                # message that's already delivered when the poller first sees it
+                # never triggers a UI update.
+                if self._seeded and (old is not None or s != "sent"):
                     await self.manager.broadcast({
                         "type": "status_update",
                         "chat_identifier": row["chat_identifier"],
@@ -180,6 +192,8 @@ class StatusPoller:
         if len(self._status_cache) > 100:
             keep = {row["ROWID"] for row in rows}
             self._status_cache = {k: v for k, v in self._status_cache.items() if k in keep}
+
+        self._seeded = True
 
         # Check for incoming messages read on other devices (iPhone, Messages.app)
         await self._check_read_sync(conn_path=self.db_path)
@@ -256,6 +270,10 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
     from imessage_reader import IMessageReader
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    # unread_count mirrors iMessage's own is_read flag — no webapp-local
+    # override. Reading in the webapp clears the badge in-memory only;
+    # to clear it persistently, read on iPhone (iCloud syncs is_read=1
+    # back to chat.db within seconds, and StatusPoller picks it up).
     rows = conn.execute("""
         WITH last_msgs AS (
             SELECT cmj.chat_id AS chat_id, MAX(m.ROWID) AS last_rowid
@@ -268,7 +286,14 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
                last_msg.date AS last_date,
                last_msg.text AS last_text,
                last_msg.attributedBody AS last_attributed_body,
-               last_msg.cache_has_attachments AS last_has_attachments
+               last_msg.cache_has_attachments AS last_has_attachments,
+               (SELECT COUNT(*) FROM message mu
+                JOIN chat_message_join cmju ON mu.ROWID = cmju.message_id
+                WHERE cmju.chat_id = c.ROWID
+                  AND mu.is_from_me = 0
+                  AND mu.is_read = 0
+                  AND mu.item_type = 0
+                  AND mu.associated_message_type = 0) AS unread_count
         FROM chat c
         JOIN last_msgs lm ON lm.chat_id = c.ROWID
         JOIN message last_msg ON last_msg.ROWID = lm.last_rowid
@@ -304,6 +329,7 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
             "display_name": display_name,
             "style": style,
             "last_text": last_text,
+            "unread_count": row["unread_count"] or 0,
         })
     return _sanitize(chats)
 
@@ -573,7 +599,18 @@ class ContactStore:
         print(f"Loaded {self.count} contacts from AddressBook")
 
 
+def _read_build_number() -> str:
+    """Read the build number from the VERSION file next to this module."""
+    version_path = os.path.join(BASE_DIR, "VERSION")
+    try:
+        with open(version_path) as f:
+            return f.read().strip()
+    except OSError:
+        return "?"
+
+
 def create_app(core: AppCore) -> FastAPI:
+    build_number = _read_build_number()
     app = FastAPI()
     app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
     _sw_path = os.path.join(BASE_DIR, "static", "sw.js")
@@ -673,7 +710,7 @@ def create_app(core: AppCore) -> FastAPI:
         if password and not _valid_session(session):
             return RedirectResponse("/login", status_code=303)
         chats = get_recent_chats(core.config.imessage.db_path, contact_store.contacts)
-        return templates.TemplateResponse(request, "chat.html", {"chats": chats})
+        return templates.TemplateResponse(request, "chat.html", {"chats": chats, "build_number": build_number})
 
     @app.get("/api/chats")
     async def api_chats(session: str | None = Cookie(default=None, alias="session")):
@@ -813,12 +850,27 @@ def create_app(core: AppCore) -> FastAPI:
         connected = await manager.connect(ws)
         if not connected:
             return
+
+        async def _ping_loop():
+            """Send application-level pings every 25s to detect zombie sockets."""
+            import asyncio as _aio
+            while True:
+                await _aio.sleep(25)
+                try:
+                    await ws.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    break
+
+        import asyncio as _asyncio
+        ping_task = _asyncio.create_task(_ping_loop())
         try:
             while True:
                 data = await ws.receive_text()
                 if len(data) > max_msg_len * 2:
                     continue
                 msg = json.loads(data)
+                if msg.get("type") == "pong":
+                    continue  # client is alive, no-op
                 if msg.get("type") == "send":
                     chat_id = msg.get("chat_identifier", "")
                     chat_style = msg.get("chat_style", 45)
@@ -846,5 +898,7 @@ def create_app(core: AppCore) -> FastAPI:
             manager.disconnect(ws)
         except Exception:
             manager.disconnect(ws)
+        finally:
+            ping_task.cancel()
 
     return app

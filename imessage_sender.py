@@ -36,9 +36,7 @@ class IMessageSender:
             # Pass text via env var to prevent AppleScript injection
             script = """
 tell application "Messages"
-    set targetService to (1st service whose service type is iMessage)
-    set targetBuddy to buddy "%IDENTIFIER%" of targetService
-    send (system attribute "IMSG_TEXT") to targetBuddy
+    send (system attribute "IMSG_TEXT") to buddy "%IDENTIFIER%"
 end tell
 """.replace("%IDENTIFIER%", identifier)
             return self._run_applescript(script, env_text=text)
@@ -46,9 +44,7 @@ end tell
             # Pass file path via env var to prevent AppleScript injection
             script = """
 tell application "Messages"
-    set targetService to (1st service whose service type is iMessage)
-    set targetBuddy to buddy "%IDENTIFIER%" of targetService
-    send (POSIX file (system attribute "IMSG_FILE")) to targetBuddy
+    send (POSIX file (system attribute "IMSG_FILE")) to buddy "%IDENTIFIER%"
 end tell
 """.replace("%IDENTIFIER%", identifier)
             return self._run_applescript(script, env_file=file_path)

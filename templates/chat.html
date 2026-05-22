@@ -496,6 +496,14 @@
 
   #status .dot.connected { background: #30d158; }
   #status .dot.disconnected { background: #ff3b30; }
+  #build-label {
+    margin-left: 8px;
+    font-size: 10px;
+    color: #555;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    letter-spacing: 0.02em;
+    user-select: none;
+  }
 
   /* New message compose */
   #new-msg-header {
@@ -591,17 +599,17 @@
   <div id="sidebar-header"><span><img src="/static/logo2.svg" alt="" width="28" height="28" style="vertical-align:middle;margin-right:8px;border-radius:6px">iMessage Web Bridge</span><button id="new-msg-btn" title="New Message"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M14 2L7 9M14 2l-4 12-3-5-5-3z"/></svg></button></div>
   <div id="chat-list">
     {% for chat in chats %}
-    <div class="chat-item" data-chat-id="{{ chat.chat_identifier }}" data-chat-style="{{ chat.style }}" data-chat-name="{{ chat.display_name }}">
+    <div class="chat-item{% if chat.unread_count %} unread{% endif %}" data-chat-id="{{ chat.chat_identifier }}" data-chat-style="{{ chat.style }}" data-chat-name="{{ chat.display_name }}">
       <div class="chat-item-row">
         <div class="chat-item-name">{{ chat.display_name }}</div>
-        <span class="unread-badge">0</span>
+        <span class="unread-badge">{{ chat.unread_count if chat.unread_count else 0 }}</span>
       </div>
       <div class="chat-item-preview">{{ chat.last_text }}</div>
     </div>
     {% endfor %}
   </div>
   <div id="prefs-btn">Preferences</div>
-  <div id="status"><span class="dot disconnected" id="status-dot"></span><span id="status-text">Connecting...</span></div>
+  <div id="status"><span class="dot disconnected" id="status-dot"></span><span id="status-text">Connecting...</span><span id="build-label">build {{ build_number }}</span></div>
 </div>
 
 <div id="prefs-overlay">
@@ -677,28 +685,63 @@ const state = {
 };
 
 // --- WebSocket ---
-function connectWS() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  state.ws = new WebSocket(`${proto}//${location.host}/ws`);
+let _wsReconnectTimer = null;
+let _wsConnecting = false;
 
-  state.ws.onopen = () => {
-    document.getElementById('status-dot').className = 'dot connected';
-    document.getElementById('status-text').textContent = 'Connected';
+function setStatus(connected, text) {
+  document.getElementById('status-dot').className = 'dot ' + (connected ? 'connected' : 'disconnected');
+  document.getElementById('status-text').textContent = text;
+}
+
+function scheduleReconnect(delayMs) {
+  if (_wsReconnectTimer) return;  // already scheduled
+  _wsReconnectTimer = setTimeout(() => {
+    _wsReconnectTimer = null;
+    connectWS();
+  }, delayMs);
+}
+
+function connectWS() {
+  // Don't stack multiple in-flight connects
+  if (_wsConnecting) return;
+  if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) return;
+
+  _wsConnecting = true;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws`);
+  state.ws = ws;
+
+  ws.onopen = () => {
+    _wsConnecting = false;
+    setStatus(true, 'Connected');
     state.lastPong = Date.now();
   };
 
-  state.ws.onclose = (event) => {
-    document.getElementById('status-dot').className = 'dot disconnected';
+  ws.onclose = (event) => {
+    _wsConnecting = false;
+    if (state.ws === ws) state.ws = null;
+    setStatus(false, 'Disconnected');
     if (event.code === 1008) {
-      document.getElementById('status-text').textContent = 'Auth failed — reload page';
+      setStatus(false, 'Auth failed — reload page');
       return;  // don't reconnect on auth failure
     }
-    document.getElementById('status-text').textContent = 'Disconnected — reconnecting...';
-    setTimeout(connectWS, 2000);
+    setStatus(false, 'Disconnected — reconnecting...');
+    scheduleReconnect(2000);
   };
 
-  state.ws.onmessage = (event) => {
+  ws.onerror = () => {
+    // onclose always fires after onerror; let it handle reconnect
+    _wsConnecting = false;
+  };
+
+  ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
+    if (data.type === 'ping') {
+      // Server health-check — reply so server knows we're alive
+      ws.send(JSON.stringify({ type: 'pong' }));
+      state.lastPong = Date.now();
+      return;
+    }
     if (data.type === 'message') {
       if (data.chat_identifier === state.chatId) {
         if (!data.is_from_me) {
@@ -737,27 +780,49 @@ function connectWS() {
   };
 }
 
-// Detect wake from sleep and refresh stale connections
+function forceReconnect(reason) {
+  if (state.ws) {
+    state.ws.onclose = null;  // suppress scheduled reconnect — we'll do it manually
+    state.ws.close();
+    state.ws = null;
+  }
+  _wsConnecting = false;
+  if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
+  setStatus(false, reason || 'Reconnecting...');
+  scheduleReconnect(500);
+}
+
+// Detect wake from sleep: interval drift approach (5s tick, >10s drift = woke up)
 let lastHeartbeat = Date.now();
 setInterval(() => {
   const now = Date.now();
-  // If interval drifted by 10s+, machine likely slept
-  if (now - lastHeartbeat > 15000) {
-    // Force close stale socket so it reconnects
-    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-      state.ws.close();
-    }
-    // Reload current chat to catch missed messages
-    if (state.chatId) {
-      reloadCurrentChat();
-    }
-    // Refresh sidebar
+  if (now - lastHeartbeat > 10000) {
+    // Machine woke from sleep — socket is definitely stale
+    forceReconnect('Reconnecting after sleep...');
+    if (state.chatId) reloadCurrentChat();
     fetch('/api/chats').then(r => r.ok ? r.json() : null).then(chats => {
       if (chats) refreshChatList(chats);
     });
   }
   lastHeartbeat = now;
 }, 5000);
+
+// Reconnect immediately when the network comes back online
+window.addEventListener('online', () => forceReconnect('Back online — reconnecting...'));
+
+// Reconnect when the tab becomes visible (covers sleep + network change on mobile/laptops)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    const ws = state.ws;
+    const dead = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+    // Also reconnect if server pings stopped (zombie socket: readyState=OPEN but TCP is dead)
+    const stale = ws && ws.readyState === WebSocket.OPEN && (Date.now() - (state.lastPong || 0)) > 60000;
+    if (dead || stale) {
+      forceReconnect('Reconnecting...');
+      if (state.chatId) reloadCurrentChat();
+    }
+  }
+});
 
 async function reloadCurrentChat() {
   if (!state.chatId) return;
@@ -855,7 +920,10 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
 
   state.chatId = item.dataset.chatId;
 
-  // Clear unread for this chat
+  // Clear unread badge in-memory only. iMessage's is_read can't be flipped
+  // from a third-party app; on reload the badge mirrors iMessage state, so
+  // it'll come back unless the user also reads on iPhone (iCloud syncs
+  // is_read=1 back, StatusPoller picks it up within a few seconds).
   delete state.unread[state.chatId];
   updateUnreadBadge(state.chatId);
   updateTitle();
@@ -989,7 +1057,12 @@ function refreshChatList(chats) {
     div.dataset.chatId = chat.chat_identifier;
     div.dataset.chatStyle = chat.style;
     div.dataset.chatName = chat.display_name;
-    div.innerHTML = `<div class="chat-item-row"><div class="chat-item-name">${escapeHtml(chat.display_name)}</div><span class="unread-badge">0</span></div><div class="chat-item-preview">${escapeHtml(chat.last_text)}</div>`;
+    const count = state.unread[chat.chat_identifier] ?? (chat.unread_count || 0);
+    if (count > 0) {
+      div.classList.add('unread');
+      state.unread[chat.chat_identifier] = count;
+    }
+    div.innerHTML = `<div class="chat-item-row"><div class="chat-item-name">${escapeHtml(chat.display_name)}</div><span class="unread-badge">${count > 99 ? '99+' : count}</span></div><div class="chat-item-preview">${escapeHtml(chat.last_text)}</div>`;
     listEl.appendChild(div);
   });
 }
@@ -1554,6 +1627,14 @@ if ('serviceWorker' in navigator) {
 }
 
 // --- Init ---
+// Seed state.unread from server-rendered counts so badge/title are correct
+// immediately on page load, before any WebSocket messages arrive.
+document.querySelectorAll('.chat-item').forEach(el => {
+  const count = parseInt(el.querySelector('.unread-badge')?.textContent || '0', 10);
+  if (count > 0) state.unread[el.dataset.chatId] = count;
+});
+updateTitle();
+
 connectWS();
 </script>
 </body>
