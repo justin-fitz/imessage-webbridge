@@ -746,6 +746,15 @@ function connectWS() {
       if (data.chat_identifier === state.chatId) {
         if (!data.is_from_me) {
           appendMessage(data);
+          // User is actively viewing this chat — update the server-side read
+          // horizon so the badge stays dismissed after a page reload.
+          if (data.rowid) {
+            fetch(`/api/chats/${encodeURIComponent(state.chatId)}/read`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ max_rowid: data.rowid }),
+            }).catch(() => {});
+          }
         }
         showLastStatus();
         if (!data.is_from_me && document.hidden) {
@@ -772,8 +781,9 @@ function connectWS() {
         updateLastSentStatus(data.status);
       }
     } else if (data.type === 'read_sync') {
-      // Message read on iPhone/Messages.app — clear unread badge
-      delete state.unread[data.chat_identifier];
+      // iPhone/Messages.app marked this chat read — clear our in-memory badge.
+      // Server already cleared the webapp_read_horizon row in _check_read_sync.
+      state.unread[data.chat_identifier] = 0;
       updateUnreadBadge(data.chat_identifier);
       updateTitle();
     }
@@ -968,6 +978,21 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   messagesEl.querySelectorAll('img, video').forEach(el => {
     el.addEventListener('load', () => { messagesEl.scrollTop = messagesEl.scrollHeight; }, { once: true });
   });
+
+  // Persist read horizon so unread badges don't reappear on page reload.
+  // We use the highest rowid from this message batch — incoming messages with
+  // higher rowids will update the horizon when they arrive via WebSocket.
+  if (messages.length > 0) {
+    const maxRowid = Math.max(...messages.map(m => m.rowid || 0));
+    if (maxRowid > 0) {
+      fetch(`/api/chats/${encodeURIComponent(state.chatId)}/read`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_rowid: maxRowid }),
+      }).catch(() => {});  // fire-and-forget, non-critical
+    }
+  }
+
   // Restore draft for this chat
   msgInput.value = state.drafts[state.chatId] || '';
   msgInput.style.height = 'auto';

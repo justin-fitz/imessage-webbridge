@@ -69,11 +69,48 @@ def _init_session_db(db_path: str):
             expiry REAL NOT NULL
         )
     """)
-    # chat_read_state was an earlier attempt at webapp-local read markers.
-    # Removed in favor of mirroring iMessage's is_read directly — the local
-    # markers diverged from the iPhone state and masked real unread counts.
+    # webapp_read_horizon: per-chat read dismissal persisted across page reloads.
+    # Stores the highest message ROWID that was visible when the user opened a
+    # chat in the web UI. get_recent_chats excludes messages at or below the
+    # horizon from unread_count, so dismissed badges don't reappear on reload.
+    # New incoming messages (ROWID > horizon) still count as unread.
+    # The row is deleted once iMessage itself marks the chat read (is_read=1),
+    # because at that point the persistent override is no longer needed.
+    _session_db.execute("""
+        CREATE TABLE IF NOT EXISTS webapp_read_horizon (
+            chat_identifier TEXT PRIMARY KEY,
+            max_rowid       INTEGER NOT NULL,
+            dismissed_at    REAL    NOT NULL
+        )
+    """)
     _session_db.execute("DROP TABLE IF EXISTS chat_read_state")
     _session_db.execute("DELETE FROM sessions WHERE expiry < ?", (time.time(),))
+    _session_db.commit()
+
+
+def _set_read_horizon(chat_identifier: str, max_rowid: int) -> None:
+    """Record that the user dismissed unread messages up through max_rowid."""
+    if not _session_db or max_rowid <= 0:
+        return
+    _session_db.execute(
+        """INSERT INTO webapp_read_horizon (chat_identifier, max_rowid, dismissed_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(chat_identifier) DO UPDATE SET
+             max_rowid    = MAX(excluded.max_rowid, max_rowid),
+             dismissed_at = excluded.dismissed_at""",
+        (chat_identifier, max_rowid, time.time()),
+    )
+    _session_db.commit()
+
+
+def _clear_read_horizon(chat_identifier: str) -> None:
+    """Remove the webapp-local horizon once iMessage confirms the chat is read."""
+    if not _session_db:
+        return
+    _session_db.execute(
+        "DELETE FROM webapp_read_horizon WHERE chat_identifier = ?",
+        (chat_identifier,),
+    )
     _session_db.commit()
 
 
@@ -225,6 +262,7 @@ class StatusPoller:
             self._read_cache[rid] = is_read
 
         for chat_id in chats_now_read:
+            _clear_read_horizon(chat_id)
             await self.manager.broadcast({
                 "type": "read_sync",
                 "chat_identifier": chat_id,
@@ -251,6 +289,7 @@ class WebHandler:
             "chat_style": msg.chat_style,
             "sender_id": sender_name,
             "is_from_me": msg.is_from_me,
+            "rowid": msg.rowid,
             "text": _sanitize(msg.text),
             "timestamp": msg.timestamp.isoformat(),
             "attachments": [
@@ -270,11 +309,18 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
     from imessage_reader import IMessageReader
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    # unread_count mirrors iMessage's own is_read flag — no webapp-local
-    # override. Reading in the webapp clears the badge in-memory only;
-    # to clear it persistently, read on iPhone (iCloud syncs is_read=1
-    # back to chat.db within seconds, and StatusPoller picks it up).
-    rows = conn.execute("""
+
+    # Attach the state DB so we can reference webapp_read_horizon in the same
+    # query without a round-trip. Falls back gracefully if the DB isn't ready yet.
+    if _session_db_path and os.path.exists(_session_db_path):
+        conn.execute("ATTACH DATABASE ? AS state_db", (_session_db_path,))
+        horizon_expr = """COALESCE(
+                (SELECT max_rowid FROM state_db.webapp_read_horizon
+                 WHERE chat_identifier = c.chat_identifier), 0)"""
+    else:
+        horizon_expr = "0"
+
+    rows = conn.execute(f"""
         WITH last_msgs AS (
             SELECT cmj.chat_id AS chat_id, MAX(m.ROWID) AS last_rowid
             FROM message m
@@ -293,7 +339,9 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
                   AND mu.is_from_me = 0
                   AND mu.is_read = 0
                   AND mu.item_type = 0
-                  AND mu.associated_message_type = 0) AS unread_count
+                  AND mu.associated_message_type = 0
+                  AND mu.ROWID > {horizon_expr}
+               ) AS unread_count
         FROM chat c
         JOIN last_msgs lm ON lm.chat_id = c.ROWID
         JOIN message last_msg ON last_msg.ROWID = lm.last_rowid
@@ -539,6 +587,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
                 }
 
         messages.append({
+            "rowid": row["ROWID"],
             "text": _sanitize(text),
             "is_from_me": bool(row["is_from_me"]),
             "sender_id": _sanitize(sender_name or sender_id),
@@ -780,6 +829,22 @@ def create_app(core: AppCore) -> FastAPI:
             raise HTTPException(status_code=401)
         limit = min(limit, 200)
         return get_chat_messages(core.config.imessage.db_path, chat_identifier, contact_store.contacts, limit=limit, offset=offset)
+
+    @app.post("/api/chats/{chat_identifier:path}/read")
+    async def mark_chat_read(chat_identifier: str, request: Request, session: str | None = Cookie(default=None, alias="session")):
+        """Record that the user has seen messages up through max_rowid.
+
+        The body should be JSON: {"max_rowid": <int>}
+        This persists across page reloads — get_recent_chats excludes messages
+        at or below this ROWID from the unread_count until iMessage syncs is_read=1.
+        """
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        body = await request.json()
+        max_rowid = int(body.get("max_rowid", 0))
+        if max_rowid > 0:
+            _set_read_horizon(chat_identifier, max_rowid)
+        return {"ok": True}
 
     @app.get("/api/attachments/{token}/{filename}")
     async def serve_attachment(token: str, filename: str, session: str | None = Cookie(default=None, alias="session")):
