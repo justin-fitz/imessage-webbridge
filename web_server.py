@@ -712,6 +712,11 @@ def create_app(core: AppCore) -> FastAPI:
         chats = get_recent_chats(core.config.imessage.db_path, contact_store.contacts)
         return templates.TemplateResponse(request, "chat.html", {"chats": chats, "build_number": build_number})
 
+    @app.get("/api/version")
+    async def api_version():
+        """Public endpoint — returns the running build number. No auth required."""
+        return {"build": build_number}
+
     @app.get("/api/chats")
     async def api_chats(session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
