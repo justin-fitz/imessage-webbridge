@@ -921,10 +921,10 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   state.chatId = item.dataset.chatId;
 
   // Clear unread badge in-memory only. iMessage's is_read can't be flipped
-  // from a third-party app; on reload the badge mirrors iMessage state, so
-  // it'll come back unless the user also reads on iPhone (iCloud syncs
-  // is_read=1 back, StatusPoller picks it up within a few seconds).
-  delete state.unread[state.chatId];
+  // from a third-party app, so the server will keep returning unread_count > 0
+  // until the iPhone syncs. Setting to 0 (not delete) ensures the ?? fallback
+  // in refreshChatList doesn't re-import the server's stale count on reconnects.
+  state.unread[state.chatId] = 0;
   updateUnreadBadge(state.chatId);
   updateTitle();
   state.chatStyle = parseInt(item.dataset.chatStyle) || 45;
