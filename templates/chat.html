@@ -870,17 +870,27 @@ async function reloadCurrentChat() {
 }
 
 function updateSidebarPreview(data) {
-  const item = document.querySelector(`.chat-item[data-chat-id="${CSS.escape(data.chat_identifier)}"]`);
-  if (item) {
-    const preview = item.querySelector('.chat-item-preview');
-    if (preview && data.text) {
-      preview.textContent = data.text.substring(0, 80);
-    }
-    // Move chat to top of list
-    const list = document.getElementById('chat-list');
-    if (item !== list.firstElementChild) {
-      list.insertBefore(item, list.firstElementChild);
-    }
+  const list = document.getElementById('chat-list');
+  let item = document.querySelector(`.chat-item[data-chat-id="${CSS.escape(data.chat_identifier)}"]`);
+  if (!item) {
+    // Brand-new thread — create a sidebar entry on the fly so it appears
+    // immediately without requiring a full page reload.
+    item = document.createElement('div');
+    item.className = 'chat-item';
+    item.dataset.chatId = data.chat_identifier;
+    item.dataset.chatStyle = data.chat_style || 45;
+    const displayName = data.chat_display_name || data.sender_id || data.chat_identifier;
+    item.dataset.chatName = displayName;
+    item.innerHTML = `<div class="chat-item-row"><div class="chat-item-name">${escapeHtml(displayName)}</div><span class="unread-badge"></span></div><div class="chat-item-preview"></div>`;
+    list.insertBefore(item, list.firstElementChild);
+  }
+  const preview = item.querySelector('.chat-item-preview');
+  if (preview && data.text) {
+    preview.textContent = data.text.substring(0, 80);
+  }
+  // Move chat to top of list
+  if (item !== list.firstElementChild) {
+    list.insertBefore(item, list.firstElementChild);
   }
 }
 
