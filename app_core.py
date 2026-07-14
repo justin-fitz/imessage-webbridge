@@ -44,12 +44,46 @@ class AppCore:
             await asyncio.sleep(self.config.imessage.poll_interval_seconds)
 
     def send_to_imessage(self, chat_identifier: str, chat_style: int, text: str | None = None, file_path: str | None = None):
+        service = self._service_for(chat_identifier, chat_style)
         if file_path:
-            self.sender.send_file(chat_identifier, chat_style, file_path)
+            self.sender.send_file(chat_identifier, chat_style, file_path, service=service)
             self._mark_sent(chat_identifier, None, os.path.basename(file_path))
         if text:
-            self.sender.send_text(chat_identifier, chat_style, text)
+            self.sender.send_text(chat_identifier, chat_style, text, service=service)
             self._mark_sent(chat_identifier, text, None)
+
+    def _service_for(self, chat_identifier: str, chat_style: int) -> str | None:
+        """Resolve the Messages service (iMessage/SMS/RCS) for a 1:1 chat.
+
+        An SMS-only recipient MUST be addressed on the SMS service or the send
+        silently fails (see IMessageSender._send_to_buddy).  Group chats
+        (style 43) are addressed by chat id and don't need this, so return None.
+        Prefer the chat row's service_name; fall back to the handle's service.
+        """
+        if chat_style == 43:
+            return None
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{self.config.imessage.db_path}?mode=ro", uri=True)
+            try:
+                row = conn.execute(
+                    "SELECT service_name FROM chat WHERE chat_identifier=? "
+                    "ORDER BY ROWID DESC LIMIT 1",
+                    (chat_identifier,),
+                ).fetchone()
+                if row and row[0]:
+                    return row[0]
+                row = conn.execute(
+                    "SELECT service FROM handle WHERE id=? ORDER BY ROWID DESC LIMIT 1",
+                    (chat_identifier,),
+                ).fetchone()
+                if row and row[0]:
+                    return row[0]
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"Service lookup failed for {chat_identifier}: {e}", flush=True)
+        return None
 
     def _should_skip(self, msg: ChatMessage) -> bool:
         if msg.is_from_me and self._was_recently_sent(msg):

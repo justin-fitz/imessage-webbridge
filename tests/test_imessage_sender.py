@@ -36,11 +36,36 @@ def test_send_text_1on1(mock_run):
     result = sender.send_text("+15551234567", 45, "Hello there")
     assert result is True
     script = mock_run.call_args[0][0][2]
-    assert 'buddy "+15551234567"' in script
+    # Addressed via `participant of service`, not the legacy `buddy` form
+    # (which fails for SMS-only numbers on macOS 26).
+    assert 'participant "+15551234567" of targetService' in script
+    assert "service type = iMessage" in script
     # Text passed via env var, not in script
     assert "IMSG_TEXT" in script
     env = mock_run.call_args[1]["env"]
     assert env["IMSG_TEXT"] == "Hello there"
+
+
+@patch("imessage_sender.subprocess.run")
+def test_send_text_1on1_sms(mock_run):
+    """SMS-only recipients must be addressed on the SMS service."""
+    mock_run.return_value = MagicMock(returncode=0)
+    sender = IMessageSender()
+    result = sender.send_text("+13135450117", 45, "hi", service="SMS")
+    assert result is True
+    script = mock_run.call_args[0][0][2]
+    assert "service type = SMS" in script
+    assert 'participant "+13135450117" of targetService' in script
+    assert "buddy" not in script
+
+
+@patch("imessage_sender.subprocess.run")
+def test_send_text_unknown_service_defaults_imessage(mock_run):
+    mock_run.return_value = MagicMock(returncode=0)
+    sender = IMessageSender()
+    sender.send_text("+15551234567", 45, "hi", service="bogus")
+    script = mock_run.call_args[0][0][2]
+    assert "service type = iMessage" in script
 
 
 @patch("imessage_sender.subprocess.run")
@@ -84,11 +109,11 @@ def test_send_file_1on1(mock_run):
     result = sender.send_file("+15551234567", 45, "/tmp/photo.jpg")
     assert result is True
     script = mock_run.call_args[0][0][2]
-    # File path is passed via env var, not interpolated into the script.
-    assert "/tmp/photo.jpg" not in script
-    assert 'system attribute "IMSG_FILE"' in script
-    assert 'buddy "+15551234567"' in script
-    assert mock_run.call_args[1]["env"]["IMSG_FILE"] == "/tmp/photo.jpg"
+    # File path MUST be a compile-time literal (macOS 26 drops the attachment
+    # otherwise — see _as_str), and the recipient is addressed via participant.
+    assert 'POSIX file "/tmp/photo.jpg"' in script
+    assert 'participant "+15551234567" of targetService' in script
+    assert "service type = iMessage" in script
 
 
 @patch("imessage_sender.subprocess.run")
@@ -98,10 +123,9 @@ def test_send_file_group(mock_run):
     result = sender.send_file("abc999", 43, "/tmp/doc.pdf")
     assert result is True
     script = mock_run.call_args[0][0][2]
-    assert "/tmp/doc.pdf" not in script
-    assert 'system attribute "IMSG_FILE"' in script
+    # File path is a compile-time literal (see test_send_file_1on1).
+    assert 'POSIX file "/tmp/doc.pdf"' in script
     assert 'chat id "any;+;abc999"' in script
-    assert mock_run.call_args[1]["env"]["IMSG_FILE"] == "/tmp/doc.pdf"
 
 
 @patch("imessage_sender.subprocess.run")
@@ -113,8 +137,10 @@ def test_send_file_path_injection_blocked(mock_run):
     result = sender.send_file("+15551234567", 45, evil)
     assert result is True
     script = mock_run.call_args[0][0][2]
+    # The raw (unescaped) payload must not appear — quotes are backslash-escaped
+    # so the injection stays inside the AppleScript string literal.
     assert evil not in script
-    assert "do shell script" not in script
+    assert '\\"' in script
 
 
 @patch("imessage_sender.subprocess.run")

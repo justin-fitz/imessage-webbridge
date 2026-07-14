@@ -464,7 +464,7 @@ class TestAppCoreSend:
             core = AppCore(config)
         core.sender = MagicMock()
         core.send_to_imessage("+15551234567", 45, text="hello")
-        core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello")
+        core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello", service=None)
 
     def test_send_file(self, tmp_path):
         config = _make_config(tmp_path)
@@ -472,7 +472,7 @@ class TestAppCoreSend:
             core = AppCore(config)
         core.sender = MagicMock()
         core.send_to_imessage("+15551234567", 45, file_path="/tmp/photo.jpg")
-        core.sender.send_file.assert_called_once_with("+15551234567", 45, "/tmp/photo.jpg")
+        core.sender.send_file.assert_called_once_with("+15551234567", 45, "/tmp/photo.jpg", service=None)
 
     @pytest.mark.asyncio
     async def test_poll_loop_handler_error(self, tmp_path):
@@ -996,7 +996,7 @@ class TestWebSocketEndpoint:
                 "chat_style": 45,
                 "text": "hello from ws",
             }))
-        core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello from ws")
+        core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello from ws", service=None)
 
     def test_ws_unknown_chat_ignored(self, tmp_path):
         """Message to unknown chat is ignored."""
