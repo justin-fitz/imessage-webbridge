@@ -9,7 +9,7 @@ APPLE_EPOCH_OFFSET = 978307200
 
 MESSAGES_QUERY = """
 SELECT m.ROWID, m.text, m.is_from_me, m.date, m.handle_id,
-       m.cache_has_attachments, m.attributedBody,
+       m.cache_has_attachments, m.attributedBody, m.service,
        h.id AS sender_id,
        c.ROWID AS chat_rowid, c.chat_identifier, c.display_name, c.style
 FROM message m
@@ -76,6 +76,7 @@ class IMessageReader:
                 chat_display_name=row["display_name"] or "",
                 chat_style=row["style"],
                 timestamp=self._convert_date(row["date"]),
+                service=row["service"],
                 attachments=attachments,
             )
             messages.append(msg)

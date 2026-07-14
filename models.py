@@ -20,4 +20,5 @@ class ChatMessage:
     chat_display_name: str
     chat_style: int  # 43 = group, 45 = 1-on-1
     timestamp: datetime
+    service: str | None = None  # "iMessage" (blue) vs "SMS"/"RCS" (green)
     attachments: list[ChatAttachment] = field(default_factory=list)

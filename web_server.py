@@ -287,6 +287,7 @@ class WebHandler:
             "chat_identifier": msg.chat_identifier,
             "chat_display_name": msg.chat_display_name,
             "chat_style": msg.chat_style,
+            "service": msg.service,
             "sender_id": sender_name,
             "is_from_me": msg.is_from_me,
             "rowid": msg.rowid,
@@ -328,7 +329,7 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
             WHERE m.item_type = 0 AND m.associated_message_type = 0
             GROUP BY cmj.chat_id
         )
-        SELECT c.chat_identifier, c.display_name, c.style,
+        SELECT c.chat_identifier, c.display_name, c.style, c.service_name,
                last_msg.date AS last_date,
                last_msg.text AS last_text,
                last_msg.attributedBody AS last_attributed_body,
@@ -376,6 +377,7 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
             "chat_identifier": row["chat_identifier"],
             "display_name": display_name,
             "style": style,
+            "service": row["service_name"],
             "last_text": last_text,
             "unread_count": row["unread_count"] or 0,
         })
@@ -563,7 +565,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
         SELECT m.ROWID, m.guid, m.text, m.is_from_me, m.date, m.attributedBody,
-               m.cache_has_attachments,
+               m.cache_has_attachments, m.service,
                m.date_delivered, m.date_read, h.id as sender_id,
                m.thread_originator_guid,
                orig.text as reply_to_text, orig.attributedBody as reply_to_body,
@@ -636,6 +638,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
             "rowid": row["ROWID"],
             "text": _sanitize(text),
             "is_from_me": bool(row["is_from_me"]),
+            "service": row["service"],
             "sender_id": _sanitize(sender_name or sender_id),
             "timestamp": ts,
             "status": status,

@@ -26,13 +26,13 @@ def _create_test_chatdb(path):
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
-        CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT, style INTEGER);
+        CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT, style INTEGER, service_name TEXT);
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
         CREATE TABLE message (
             ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, is_from_me INTEGER DEFAULT 0,
             date INTEGER, handle_id INTEGER, cache_has_attachments INTEGER DEFAULT 0,
             item_type INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
-            associated_message_guid TEXT,
+            associated_message_guid TEXT, service TEXT,
             attributedBody BLOB, date_delivered INTEGER DEFAULT 0, date_read INTEGER DEFAULT 0,
             thread_originator_guid TEXT, is_read INTEGER DEFAULT 0
         );

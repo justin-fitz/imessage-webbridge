@@ -30,6 +30,7 @@ def _create_mock_chatdb(path):
             cache_has_attachments INTEGER DEFAULT 0,
             item_type INTEGER DEFAULT 0,
             associated_message_type INTEGER DEFAULT 0,
+            service TEXT,
             attributedBody BLOB
         );
         CREATE TABLE chat_message_join (

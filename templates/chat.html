@@ -177,6 +177,11 @@
     border-bottom-right-radius: 4px;
   }
 
+  /* Outgoing SMS/RCS (non-iMessage) bubbles are green, matching Messages.app */
+  .msg.from-me.sms {
+    background: #34c759;
+  }
+
   .msg.from-them {
     align-self: flex-start;
     background: #333;
@@ -380,6 +385,11 @@
 
   #compose button:hover { background: #0a75e0; }
   #compose button:disabled { opacity: 0.5; cursor: default; }
+
+  /* SMS/RCS thread: green composer accents to match the green bubbles */
+  body.sms-thread #compose textarea:focus { border-color: #34c759; }
+  body.sms-thread #compose button { background: #34c759; }
+  body.sms-thread #compose button:hover { background: #2fb350; }
 
   /* Empty state */
   #empty-state {
@@ -651,7 +661,7 @@
   <div id="sidebar-header"><span><img src="/static/logo2.svg" alt="" width="28" height="28" style="vertical-align:middle;margin-right:8px;border-radius:6px">iMessage Web Bridge</span><button id="new-msg-btn" title="New Message"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M14 2L7 9M14 2l-4 12-3-5-5-3z"/></svg></button></div>
   <div id="chat-list">
     {% for chat in chats %}
-    <div class="chat-item{% if chat.unread_count %} unread{% endif %}" data-chat-id="{{ chat.chat_identifier }}" data-chat-style="{{ chat.style }}" data-chat-name="{{ chat.display_name }}">
+    <div class="chat-item{% if chat.unread_count %} unread{% endif %}" data-chat-id="{{ chat.chat_identifier }}" data-chat-style="{{ chat.style }}" data-chat-service="{{ chat.service }}" data-chat-name="{{ chat.display_name }}">
       <div class="chat-item-row">
         <div class="chat-item-name">{{ chat.display_name }}</div>
         <span class="unread-badge">{{ chat.unread_count if chat.unread_count else 0 }}</span>
@@ -730,6 +740,7 @@
 const state = {
   chatId: null,
   chatStyle: 45,
+  service: 'iMessage',
   chatName: '',
   ws: null,
   drafts: {}, // chat_identifier -> unsent text
@@ -1021,6 +1032,7 @@ function updateSidebarPreview(data) {
     item.className = 'chat-item';
     item.dataset.chatId = data.chat_identifier;
     item.dataset.chatStyle = data.chat_style || 45;
+    if (data.service) item.dataset.chatService = data.service;
     const displayName = data.chat_display_name || data.sender_id || data.chat_identifier;
     item.dataset.chatName = displayName;
     item.innerHTML = `<div class="chat-item-row"><div class="chat-item-name">${escapeHtml(displayName)}</div><span class="unread-badge"></span></div><div class="chat-item-preview"></div>`;
@@ -1091,6 +1103,7 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   updateUnreadBadge(state.chatId);
   updateTitle();
   state.chatStyle = parseInt(item.dataset.chatStyle) || 45;
+  state.service = item.dataset.chatService || 'iMessage';
   state.chatName = item.dataset.chatName;
   state.msgOffset = 0;
   state.hasMore = true;
@@ -1101,6 +1114,7 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   document.getElementById('messages').style.display = 'flex';
   document.getElementById('compose').style.display = 'flex';
   document.getElementById('send-btn').disabled = false;
+  applyServiceTheme();
   document.body.classList.add('chat-open');
 
   const messagesEl = document.getElementById('messages');
@@ -1152,6 +1166,14 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   if (msgInput.value) msgInput.style.height = Math.min(msgInput.scrollHeight, 150) + 'px';
   msgInput.focus();
 });
+
+// Tint the composer green for SMS/RCS threads, blue for iMessage.
+function applyServiceTheme() {
+  const isSms = state.service && state.service !== 'iMessage' && state.service !== 'iMessageLite';
+  document.body.classList.toggle('sms-thread', !!isSms);
+  const input = document.getElementById('msg-input');
+  if (input) input.placeholder = isSms ? 'Text Message' : 'iMessage';
+}
 
 // --- Send ---
 async function sendMessage() {
@@ -1211,6 +1233,7 @@ async function sendMessage() {
   const msgData = {
     is_from_me: true,
     sender_id: 'me',
+    service: state.service,
     timestamp: new Date().toISOString(),
   };
   if (text) msgData.text = text;
@@ -1234,6 +1257,7 @@ function refreshChatList(chats) {
     div.className = 'chat-item';
     div.dataset.chatId = chat.chat_identifier;
     div.dataset.chatStyle = chat.style;
+    if (chat.service) div.dataset.chatService = chat.service;
     div.dataset.chatName = chat.display_name;
     const count = state.unread[chat.chat_identifier] ?? (chat.unread_count || 0);
     if (count > 0) {
@@ -1360,8 +1384,11 @@ function createMessageElement(msg, showAvatar) {
   const isGroup = state.chatStyle === 43;
   const fromThem = !msg.is_from_me;
 
+  // Green bubble for outgoing SMS/RCS; blue for iMessage. Unknown/absent
+  // service defaults to iMessage (blue) so nothing regresses to green.
+  const isSms = msg.service && msg.service !== 'iMessage' && msg.service !== 'iMessageLite';
   const msgDiv = document.createElement('div');
-  msgDiv.className = `msg ${msg.is_from_me ? 'from-me' : 'from-them'}`;
+  msgDiv.className = `msg ${msg.is_from_me ? 'from-me' : 'from-them'}${msg.is_from_me && isSms ? ' sms' : ''}`;
   if (fromThem && isGroup) msgDiv.dataset.sender = msg.sender_id || '';
 
   let html = '';
