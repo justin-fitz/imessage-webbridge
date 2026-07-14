@@ -382,6 +382,52 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
     return _sanitize(chats)
 
 
+def find_chat_for_identifier(db_path: str, identifier: str) -> dict | None:
+    """Find the most-recent individual chat matching a contact identifier.
+
+    The sidebar only shows the 50 most-recent chats, but a contact's existing
+    conversation may rank lower (e.g. #64) and thus be absent from the DOM — so
+    selecting that contact in the composer would otherwise start a blank thread
+    with no history. This resolves the identifier against ALL chats in chat.db,
+    matching phone numbers by their normalized last-10 digits and emails case-
+    insensitively, and returns the best (most-recent, non-empty, style 45) match.
+
+    Returns a chat dict ({chat_identifier, style}) or None if no chat exists.
+    """
+    from contacts import _normalize_phone
+
+    is_email = "@" in identifier
+    norm = identifier.lower() if is_email else _normalize_phone(identifier)
+    if not norm:
+        return None
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    # Only individual chats (style 45) with at least one message, most-recent first.
+    rows = conn.execute("""
+        SELECT c.chat_identifier, c.style, MAX(m.date) AS last_date
+        FROM chat c
+        JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+        JOIN message m ON m.ROWID = cmj.message_id
+        WHERE c.style = 45
+        GROUP BY c.ROWID
+        ORDER BY last_date DESC
+    """).fetchall()
+    conn.close()
+
+    for row in rows:
+        cid = row["chat_identifier"]
+        if not cid:
+            continue
+        if is_email:
+            if cid.lower() == norm:
+                return {"chat_identifier": cid, "style": row["style"]}
+        else:
+            if _normalize_phone(cid) == norm:
+                return {"chat_identifier": cid, "style": row["style"]}
+    return None
+
+
 _attachment_registry: dict[str, tuple[str, float]] = {}
 _ATTACHMENT_TTL = 3600
 
@@ -763,8 +809,8 @@ def create_app(core: AppCore) -> FastAPI:
 
     @app.get("/api/version")
     async def api_version():
-        """Public endpoint — returns the running build number. No auth required."""
-        return {"build": build_number}
+        """Public endpoint — returns the running build number and server time. No auth required."""
+        return {"build": build_number, "server_time": time.time()}
 
     @app.get("/api/chats")
     async def api_chats(session: str | None = Cookie(default=None, alias="session")):
@@ -787,6 +833,21 @@ def create_app(core: AppCore) -> FastAPI:
         if len(q) < 2:
             return []
         return search_contacts(q, contact_store.contacts)
+
+    @app.get("/api/contacts/resolve-chat")
+    async def resolve_chat(identifier: str = "", session: str | None = Cookie(default=None, alias="session")):
+        """Find an existing individual chat for a contact identifier, if any.
+
+        Used by the composer so picking a contact opens their existing thread
+        (with history) even when that chat is outside the 50-chat sidebar list.
+        Returns {chat_identifier, style} or {chat_identifier: null}.
+        """
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        if not identifier:
+            return {"chat_identifier": None}
+        match = find_chat_for_identifier(core.config.imessage.db_path, identifier)
+        return match or {"chat_identifier": None}
 
     @app.get("/api/contacts/status")
     async def contacts_status(session: str | None = Cookie(default=None, alias="session")):

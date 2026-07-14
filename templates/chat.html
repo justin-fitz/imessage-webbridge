@@ -19,13 +19,15 @@
 
   /* Sidebar */
   #sidebar {
-    width: 320px;
-    min-width: 320px;
+    width: 280px;
+    min-width: 280px;
+    max-width: 280px;
     background: #222;
     border-right: 1px solid #333;
     display: flex;
     flex-direction: column;
     height: 100vh;
+    overflow-x: hidden;
   }
 
   #sidebar-header {
@@ -59,6 +61,7 @@
   #chat-list {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .chat-item {
@@ -75,6 +78,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
   }
 
   .chat-item-name {
@@ -85,6 +89,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1;
+    min-width: 0;
   }
 
   .chat-item.unread .chat-item-name { font-weight: 700; }
@@ -147,6 +152,9 @@
     font-size: 14px;
     line-height: 1.4;
     word-wrap: break-word;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    min-width: 0;
   }
 
   .msg-body {
@@ -158,6 +166,8 @@
     align-items: baseline;
     gap: 6px;
     flex-wrap: wrap;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .msg.from-me {
@@ -483,6 +493,14 @@
     font-size: 11px;
     color: #666;
     border-top: 1px solid #333;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  #status-row {
+    display: flex;
+    align-items: center;
   }
 
   #status .dot {
@@ -503,6 +521,40 @@
     font-family: 'SF Mono', 'Menlo', monospace;
     letter-spacing: 0.02em;
     user-select: none;
+  }
+
+  #last-checked-label {
+    display: block;
+    font-size: 10px;
+    color: #444;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    letter-spacing: 0.02em;
+    user-select: none;
+    margin-top: 1px;
+  }
+
+  #update-banner {
+    display: none;
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #0b84fe;
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    cursor: pointer;
+    z-index: 9999;
+    white-space: nowrap;
+    animation: bannerPop 0.2s ease-out;
+  }
+  #update-banner:hover { background: #0a75e0; }
+  @keyframes bannerPop {
+    from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
   }
 
   /* New message compose */
@@ -580,7 +632,7 @@
   }
 
   .contact-result:last-child { border-bottom: none; }
-  .contact-result:hover { background: #333; }
+  .contact-result:hover, .contact-result.active { background: #333; }
   .contact-result .contact-name { font-weight: 500; }
   .contact-result .contact-id { color: #888; margin-left: 8px; font-size: 12px; }
 
@@ -609,8 +661,11 @@
     {% endfor %}
   </div>
   <div id="prefs-btn">Preferences</div>
-  <div id="status"><span class="dot disconnected" id="status-dot"></span><span id="status-text">Connecting...</span><span id="build-label">build {{ build_number }}</span></div>
+  <div id="status"><div id="status-row"><span class="dot disconnected" id="status-dot"></span><span id="status-text">Connecting...</span><span id="build-label">build {{ build_number }}</span></div><span id="last-checked-label"></span></div>
 </div>
+
+<div id="update-banner">⬆ New version available — tap to reload</div>
+<script>const _BUILD = "{{ build_number }}";</script>
 
 <div id="prefs-overlay">
   <div id="prefs-panel">
@@ -687,18 +742,51 @@ const state = {
 // --- WebSocket ---
 let _wsReconnectTimer = null;
 let _wsConnecting = false;
+let _wsReconnectAttempts = 0;
 
 function setStatus(connected, text) {
   document.getElementById('status-dot').className = 'dot ' + (connected ? 'connected' : 'disconnected');
   document.getElementById('status-text').textContent = text;
 }
 
+// Redirect to login if the session has expired / server restarted and dropped our cookie.
+function redirectToLogin() {
+  setStatus(false, 'Session expired — redirecting to login…');
+  setTimeout(() => { window.location.href = '/login'; }, 1200);
+}
+
+// Probe the server — if we get a 401/403 redirect to login; otherwise reconnect.
+async function checkSessionThenReconnect() {
+  try {
+    const r = await fetch('/api/version');
+    if (r.status === 401 || r.status === 403 || r.redirected && r.url.includes('/login')) {
+      redirectToLogin();
+      return;
+    }
+  } catch (_) {
+    // Network down — keep trying
+  }
+  connectWS();
+}
+
 function scheduleReconnect(delayMs) {
   if (_wsReconnectTimer) return;  // already scheduled
+  _wsReconnectAttempts++;
+  // After ~2 minutes of failures, check session health before retrying.
+  // Beyond 20 attempts (≈5 min) redirect rather than loop forever.
+  if (_wsReconnectAttempts > 20) {
+    redirectToLogin();
+    return;
+  }
+  const delay = Math.min(delayMs * Math.pow(1.5, Math.min(_wsReconnectAttempts - 1, 6)), 30000);
   _wsReconnectTimer = setTimeout(() => {
     _wsReconnectTimer = null;
-    connectWS();
-  }, delayMs);
+    if (_wsReconnectAttempts > 3) {
+      checkSessionThenReconnect();
+    } else {
+      connectWS();
+    }
+  }, delay);
 }
 
 function connectWS() {
@@ -713,19 +801,22 @@ function connectWS() {
 
   ws.onopen = () => {
     _wsConnecting = false;
+    _wsReconnectAttempts = 0;  // reset on successful connect
     setStatus(true, 'Connected');
     state.lastPong = Date.now();
+    // Every reconnect could mean the server restarted with a new build — check immediately.
+    checkForUpdate();
   };
 
   ws.onclose = (event) => {
     _wsConnecting = false;
     if (state.ws === ws) state.ws = null;
-    setStatus(false, 'Disconnected');
+    // Auth failure (server rejected the session cookie on WS upgrade)
     if (event.code === 1008) {
-      setStatus(false, 'Auth failed — reload page');
-      return;  // don't reconnect on auth failure
+      redirectToLogin();
+      return;
     }
-    setStatus(false, 'Disconnected — reconnecting...');
+    setStatus(false, 'Disconnected — reconnecting…');
     scheduleReconnect(2000);
   };
 
@@ -771,9 +862,7 @@ function connectWS() {
         // Notifications for messages not in current view
         const senderName = data.sender_id || data.chat_display_name || cid;
         showNotification(senderName, data.text);
-        if (document.hidden) {
-          startFlash(`New message from ${senderName}`);
-        }
+        startFlash(`New message from ${senderName}`);
       }
       updateSidebarPreview(data);
     } else if (data.type === 'status_update') {
@@ -817,6 +906,23 @@ setInterval(() => {
   lastHeartbeat = now;
 }, 5000);
 
+// Periodic session health check (every 90s): if WS appears connected but the HTTP
+// session is expired (server restarted, cookie invalidated), redirect to login.
+setInterval(async () => {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  // Also catch zombie sockets: WS says OPEN but server pings stopped
+  if (state.lastPong && Date.now() - state.lastPong > 75000) {
+    forceReconnect('Connection stale — reconnecting…');
+    return;
+  }
+  try {
+    const r = await fetch('/api/version');
+    if (r.status === 401 || r.status === 403 || (r.redirected && r.url.includes('/login'))) {
+      redirectToLogin();
+    }
+  } catch (_) { /* network blip, ignore */ }
+}, 90000);
+
 // Reconnect immediately when the network comes back online
 window.addEventListener('online', () => forceReconnect('Back online — reconnecting...'));
 
@@ -833,6 +939,42 @@ document.addEventListener('visibilitychange', () => {
     }
   }
 });
+
+// --- Update banner ---
+// Poll /api/version every 5 minutes. If the server build differs from what this
+// page was loaded with, show a banner prompting the user to reload.
+const _updateBanner = document.getElementById('update-banner');
+const _lastCheckedLabel = document.getElementById('last-checked-label');
+_updateBanner.addEventListener('click', () => window.location.reload());
+
+function _fmtCheckedTime(ts) {
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const time = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  if (sameDay) return time;
+  const date = d.toLocaleDateString([], {month: 'short', day: 'numeric'});
+  return `${date} ${time}`;
+}
+
+async function checkForUpdate() {
+  try {
+    const r = await fetch('/api/version');
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data.build && data.build !== _BUILD) {
+      _updateBanner.style.display = 'block';
+    }
+    if (data.server_time && _lastCheckedLabel) {
+      _lastCheckedLabel.textContent = `checked ${_fmtCheckedTime(data.server_time)}`;
+    }
+  } catch (_) { /* network blip */ }
+}
+// Check immediately on load, shortly after (catches a restart that happened while
+// the tab was open), then every 5 minutes.
+checkForUpdate();
+setTimeout(checkForUpdate, 15000);
+setInterval(checkForUpdate, 5 * 60 * 1000);
 
 async function reloadCurrentChat() {
   if (!state.chatId) return;
@@ -926,6 +1068,7 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   const item = e.target.closest('.chat-item');
   if (!item) return;
 
+  stopFlash();
   document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
   item.classList.add('active');
   document.getElementById('new-msg-header').style.display = 'none';
@@ -1620,33 +1763,120 @@ document.getElementById('contact-search').addEventListener('input', (e) => {
       `<span class="contact-id">${escapeHtml(r.identifier)}</span></div>`
     ).join('');
     container.classList.add('open');
+    contactActiveIdx = -1;  // reset keyboard selection on new results
   }, 250);
 });
 
-document.getElementById('contact-results').addEventListener('click', (e) => {
-  const item = e.target.closest('.contact-result');
+// --- Keyboard navigation of the contact-results dropdown ---
+let contactActiveIdx = -1;
+
+function setContactActive(idx) {
+  const items = [...document.querySelectorAll('#contact-results .contact-result')];
+  if (items.length === 0) return;
+  // wrap around
+  if (idx < 0) idx = items.length - 1;
+  if (idx >= items.length) idx = 0;
+  items.forEach(el => el.classList.remove('active'));
+  items[idx].classList.add('active');
+  items[idx].scrollIntoView({ block: 'nearest' });
+  contactActiveIdx = idx;
+}
+
+document.getElementById('contact-search').addEventListener('keydown', (e) => {
+  const container = document.getElementById('contact-results');
+  const open = container.classList.contains('open');
+  const items = [...container.querySelectorAll('.contact-result')];
+  if (!open || items.length === 0) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    setContactActive(contactActiveIdx + 1);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    setContactActive(contactActiveIdx - 1);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    // Enter with no explicit selection picks the first result.
+    const idx = contactActiveIdx >= 0 ? contactActiveIdx : 0;
+    selectContactResult(items[idx]);
+  } else if (e.key === 'Escape') {
+    container.classList.remove('open');
+    contactActiveIdx = -1;
+  }
+});
+
+// Select a contact-result element (shared by click + keyboard Enter).
+async function selectContactResult(item) {
   if (!item) return;
   const identifier = item.dataset.id;
+  const name = item.dataset.name;
 
-  // If this is the first recipient and an existing 1:1 chat exists with this contact,
-  // open it (with history) instead of starting a blank new-message composer.
+  // If this is the first recipient, try to open an existing conversation with
+  // this contact (so history loads) instead of starting a blank composer.
   if (newMsgRecipients.length === 0) {
-    const existingChat = document.querySelector(
+    // 1) Fast path: the chat is already in the sidebar DOM (top-50). Match by
+    //    identifier, then by contact name (same person may be stored under a
+    //    different identifier — phone vs email).
+    let existingChat = document.querySelector(
       `.chat-item[data-chat-id="${CSS.escape(identifier)}"]`
     );
+    if (!existingChat && name) {
+      existingChat = [...document.querySelectorAll('.chat-item')].find(
+        el => el.dataset.chatName === name && el.dataset.chatStyle !== '43'
+      );
+    }
     if (existingChat) {
       document.getElementById('contact-search').value = '';
       document.getElementById('contact-results').classList.remove('open');
       existingChat.click();
       return;
     }
+
+    // 2) Slow path: ask the server to resolve this identifier to any existing
+    //    chat (the sidebar only shows 50 of thousands of chats, so the thread
+    //    may exist but be absent from the DOM). If found, open it with history.
+    try {
+      const r = await fetch(`/api/contacts/resolve-chat?identifier=${encodeURIComponent(identifier)}`);
+      if (r.ok) {
+        const data = await r.json();
+        if (data.chat_identifier) {
+          document.getElementById('contact-search').value = '';
+          document.getElementById('contact-results').classList.remove('open');
+          openChatById(data.chat_identifier, data.style || 45, name || data.chat_identifier);
+          return;
+        }
+      }
+    } catch (_) { /* fall through to blank composer */ }
   }
 
-  newMsgRecipients.push({ name: item.dataset.name, identifier });
+  newMsgRecipients.push({ name, identifier });
   renderRecipients();
   document.getElementById('contact-search').value = '';
   document.getElementById('contact-results').classList.remove('open');
   document.getElementById('contact-search').focus();
+}
+
+// Open a chat by identifier directly (no sidebar .chat-item needed). Injects a
+// temporary chat-item into the list if absent, then clicks it to reuse all the
+// existing open-chat logic (history load, read horizon, drafts, etc.).
+function openChatById(chatId, chatStyle, chatName) {
+  let item = document.querySelector(`.chat-item[data-chat-id="${CSS.escape(chatId)}"]`);
+  if (!item) {
+    const listEl = document.getElementById('chat-list');
+    item = document.createElement('div');
+    item.className = 'chat-item';
+    item.dataset.chatId = chatId;
+    item.dataset.chatStyle = chatStyle;
+    item.dataset.chatName = chatName;
+    item.innerHTML = `<div class="chat-item-row"><div class="chat-item-name">${escapeHtml(chatName)}</div><span class="unread-badge">0</span></div><div class="chat-item-preview"></div>`;
+    listEl.insertBefore(item, listEl.firstChild);
+  }
+  item.click();
+}
+
+document.getElementById('contact-results').addEventListener('click', (e) => {
+  const item = e.target.closest('.contact-result');
+  selectContactResult(item);
 });
 
 // Close results when clicking outside

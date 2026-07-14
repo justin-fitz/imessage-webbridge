@@ -49,6 +49,13 @@ class IMessageReader:
             self.channel_map.set_state("last_seen_rowid", str(self.last_seen_rowid))
 
     def poll(self) -> list[ChatMessage]:
+        # Reset the read snapshot so WAL-mode writes from Messages.app are visible.
+        # A persistent read-only connection can get stuck on a stale snapshot;
+        # rolling back any implicit transaction forces SQLite to start fresh.
+        try:
+            self.conn.rollback()
+        except Exception:
+            pass
         rows = self.conn.execute(MESSAGES_QUERY, (self.last_seen_rowid,)).fetchall()
         messages = []
         for row in rows:

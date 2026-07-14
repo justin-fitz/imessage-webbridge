@@ -72,26 +72,61 @@ def load_contacts() -> dict[str, str]:
 
 
 def search_contacts(query: str, contacts: dict[str, str], limit: int = 20) -> list[dict]:
-    """Search contacts by name or identifier. Returns list of {name, identifier}."""
+    """Search contacts by name or identifier. Returns list of {name, identifier}.
+
+    Returns all identifiers for a matching contact (phone + email), with phone
+    numbers sorted before email addresses so the most useful one appears first.
+
+    Results are ranked so that the most relevant matches come first:
+      0. Name starts with the query              (e.g. "ryan" -> "Ryan Fitzhugh")
+      1. A word in the name starts with the query (e.g. "fitz" -> "Ryan Fitzhugh")
+      2. Query appears somewhere in the name      (e.g. "ryan" -> "Bryan Adams")
+      3. Query only matches the identifier         (e.g. an email/phone substring)
+    Within the same rank, results are alphabetical by name.
+    """
     query_lower = query.lower()
-    results = []
-    seen = set()
+
+    def rank(name: str, matched_name: bool) -> int:
+        name_lower = name.lower()
+        if not matched_name:
+            return 3  # matched on identifier only
+        if name_lower.startswith(query_lower):
+            return 0  # name starts with query
+        if any(word.startswith(query_lower) for word in name_lower.split()):
+            return 1  # a word in the name starts with query
+        return 2  # query is a mid-word substring of the name
+
+    # Group all matching identifiers by contact name, tracking best rank
+    by_name: dict[str, list[str]] = {}
+    name_rank: dict[str, int] = {}
     for identifier, name in contacts.items():
-        if query_lower in name.lower() or query_lower in identifier.lower():
-            if name not in seen:
-                # Format phone numbers for display
-                if "@" not in identifier and identifier.isdigit():
-                    if len(identifier) == 10:
-                        display_id = f"+1{identifier}"
-                    else:
-                        display_id = f"+{identifier}"
+        matched_name = query_lower in name.lower()
+        matched_id = query_lower in identifier.lower()
+        if not (matched_name or matched_id):
+            continue
+        by_name.setdefault(name, []).append(identifier)
+        r = rank(name, matched_name)
+        if name not in name_rank or r < name_rank[name]:
+            name_rank[name] = r
+
+    results = []
+    # Sort by (rank, name) so prefix matches lead, then alphabetical
+    for name in sorted(by_name, key=lambda n: (name_rank[n], n.lower())):
+        identifiers = by_name[name]
+        # Sort: phone numbers before email addresses
+        identifiers.sort(key=lambda x: (1 if "@" in x else 0, x))
+        for identifier in identifiers:
+            # Format phone numbers for display
+            if "@" not in identifier and identifier.isdigit():
+                if len(identifier) == 10:
+                    display_id = f"+1{identifier}"
                 else:
-                    display_id = identifier
-                results.append({"name": name, "identifier": display_id})
-                seen.add(name)
+                    display_id = f"+{identifier}"
+            else:
+                display_id = identifier
+            results.append({"name": name, "identifier": display_id})
             if len(results) >= limit:
-                break
-    results.sort(key=lambda r: r["name"])
+                return results
     return results
 
 

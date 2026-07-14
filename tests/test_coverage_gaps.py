@@ -394,11 +394,17 @@ class TestContacts:
         results = search_contacts("Person", contacts, limit=5)
         assert len(results) == 5
 
-    def test_search_contacts_dedup_by_name(self):
+    def test_search_contacts_all_identifiers_per_name(self):
+        """A contact with multiple identifiers returns one row per identifier,
+        phone numbers sorted before emails."""
         from contacts import search_contacts
         contacts = {"5551111111": "John Smith", "john@test.com": "John Smith"}
         results = search_contacts("john", contacts)
-        assert len(results) == 1
+        assert len(results) == 2
+        assert [r["name"] for r in results] == ["John Smith", "John Smith"]
+        # Phone before email
+        assert results[0]["identifier"] == "+15551111111"
+        assert results[1]["identifier"] == "john@test.com"
 
     def test_search_contacts_phone_formatting(self):
         from contacts import search_contacts
