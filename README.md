@@ -1,6 +1,25 @@
 # iMessage Web Gateway
 
-A local macOS application that provides a web UI for iMessage. Supports bidirectional messaging with attachments, contact name resolution, tapback reactions, delivery/read status, and inline image display.
+A local, self-hosted web client for iMessage — read and send your Messages from **any device with a browser**: Android, Windows, Linux, or another Mac. Nothing to install on the client; it all runs on your own Mac. Bidirectional messaging with attachments, contact-name resolution, tapback reactions, delivery/read status, and inline images.
+
+<p align="center">
+  <img src="docs/screenshots/demo.gif" width="820" alt="iMessage Web Gateway — browsing iMessage and SMS threads from a browser">
+</p>
+
+SMS/RCS threads are green and iMessage threads are blue, just like Messages.app:
+
+<p align="center">
+  <img src="docs/screenshots/thread-imessage-blue.png" width="405" alt="iMessage conversation with blue bubbles and read receipts">
+  <img src="docs/screenshots/thread-sms-green.png" width="405" alt="SMS conversation with green bubbles">
+</p>
+
+Inline images and tapback reactions render right in the thread:
+
+<p align="center">
+  <img src="docs/screenshots/attachments-reactions.png" width="600" alt="Inline image attachment with a tapback reaction">
+</p>
+
+> Screenshots use a demo dataset with fictional contacts — no real conversations.
 
 ## Requirements
 
