@@ -188,7 +188,8 @@ class StatusPoller:
         conn.execute("PRAGMA query_only = ON")
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT m.ROWID, m.date_delivered, m.date_read, c.chat_identifier
+            SELECT m.ROWID, m.date_delivered, m.date_read, m.was_delivered_quietly,
+                   c.chat_identifier
             FROM message m
             JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
             JOIN chat c ON cmj.chat_id = c.ROWID
@@ -199,6 +200,17 @@ class StatusPoller:
             LIMIT 20
         """).fetchall()
         conn.close()
+
+        # Per-chat "notifications silenced" state: whether the most recent
+        # DELIVERED outgoing message was delivered quietly (recipient in a
+        # Focus/DND with status shared). Mirrors the banner Messages.app shows.
+        silenced_by_chat: dict[str, bool] = {}
+        for row in rows:
+            cid = row["chat_identifier"]
+            if cid in silenced_by_chat:
+                continue
+            if row["date_delivered"] and row["date_delivered"] != 0:
+                silenced_by_chat[cid] = bool(row["was_delivered_quietly"])
 
         for row in rows:
             rid = row["ROWID"]
@@ -224,6 +236,7 @@ class StatusPoller:
                         "type": "status_update",
                         "chat_identifier": row["chat_identifier"],
                         "status": s,
+                        "silenced": silenced_by_chat.get(row["chat_identifier"], False),
                     })
 
         if len(self._status_cache) > 100:
@@ -565,7 +578,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
         SELECT m.ROWID, m.guid, m.text, m.is_from_me, m.date, m.attributedBody,
-               m.cache_has_attachments, m.service,
+               m.cache_has_attachments, m.service, m.was_delivered_quietly,
                m.date_delivered, m.date_read, h.id as sender_id,
                m.thread_originator_guid,
                orig.text as reply_to_text, orig.attributedBody as reply_to_body,
@@ -639,6 +652,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
             "text": _sanitize(text),
             "is_from_me": bool(row["is_from_me"]),
             "service": row["service"],
+            "delivered_quietly": bool(row["was_delivered_quietly"]),
             "sender_id": _sanitize(sender_name or sender_id),
             "timestamp": ts,
             "status": status,

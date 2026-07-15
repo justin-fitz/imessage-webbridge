@@ -116,7 +116,7 @@ def _create_test_chatdb(path):
             ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, is_from_me INTEGER DEFAULT 0,
             date INTEGER, handle_id INTEGER, cache_has_attachments INTEGER DEFAULT 0,
             item_type INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
-            associated_message_guid TEXT, service TEXT,
+            associated_message_guid TEXT, service TEXT, was_delivered_quietly INTEGER DEFAULT 0,
             attributedBody BLOB, date_delivered INTEGER DEFAULT 0, date_read INTEGER DEFAULT 0,
             thread_originator_guid TEXT, is_read INTEGER DEFAULT 0
         );
@@ -186,6 +186,19 @@ def test_get_chat_messages_surfaces_service(tmp_path):
     messages = get_chat_messages(db_path, "+15551234567", {})
     assert messages[0]["service"] == "SMS"
     assert messages[2]["service"] == "iMessage"
+
+
+def test_get_chat_messages_surfaces_delivered_quietly(tmp_path):
+    """delivered_quietly drives the 'notifications silenced' banner."""
+    db_path = str(tmp_path / "chat.db")
+    _create_test_chatdb(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE message SET was_delivered_quietly=1 WHERE ROWID=1")
+    conn.commit()
+    conn.close()
+    messages = get_chat_messages(db_path, "+15551234567", {})
+    assert messages[0]["delivered_quietly"] is True
+    assert messages[1]["delivered_quietly"] is False
 
 
 def test_get_chat_messages_empty(tmp_path):

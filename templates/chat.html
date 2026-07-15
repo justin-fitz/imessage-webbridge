@@ -386,6 +386,15 @@
   #compose button:hover { background: #0a75e0; }
   #compose button:disabled { opacity: 0.5; cursor: default; }
 
+  /* "Notifications silenced" (recipient Focus/DND) banner, above the composer */
+  #focus-banner {
+    text-align: center;
+    font-size: 12px;
+    color: #9a9a9e;
+    padding: 6px 12px 0;
+    flex-shrink: 0;
+  }
+
   /* SMS/RCS thread: green composer accents to match the green bubbles */
   body.sms-thread #compose textarea:focus { border-color: #34c759; }
   body.sms-thread #compose button { background: #34c759; }
@@ -726,6 +735,7 @@
   </div>
   <div id="empty-state">Select a conversation to start</div>
   <div id="messages" style="display:none"></div>
+  <div id="focus-banner" style="display:none"></div>
   <div id="compose" style="display:none">
     <div id="paste-preview" style="display:none">
       <img id="paste-preview-img">
@@ -879,6 +889,7 @@ function connectWS() {
     } else if (data.type === 'status_update') {
       if (data.chat_identifier === state.chatId) {
         updateLastSentStatus(data.status);
+        if (typeof data.silenced === 'boolean') updateFocusBanner(data.silenced);
       }
     } else if (data.type === 'read_sync') {
       // iPhone/Messages.app marked this chat read — clear our in-memory badge.
@@ -1016,6 +1027,7 @@ async function reloadCurrentChat() {
     messagesEl.appendChild(createMessageElement(msg, showAvatar));
   });
   showLastStatus();
+  updateFocusBanner();
   messagesEl.scrollTop = messagesEl.scrollHeight;
   messagesEl.querySelectorAll('img, video').forEach(el => {
     el.addEventListener('load', () => { messagesEl.scrollTop = messagesEl.scrollHeight; }, { once: true });
@@ -1140,6 +1152,7 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
     messagesEl.appendChild(div);
   });
   showLastStatus();
+  updateFocusBanner();
   messagesEl.scrollTop = messagesEl.scrollHeight;
   // Re-scroll after images/media finish loading
   messagesEl.querySelectorAll('img, video').forEach(el => {
@@ -1390,6 +1403,11 @@ function createMessageElement(msg, showAvatar) {
   const msgDiv = document.createElement('div');
   msgDiv.className = `msg ${msg.is_from_me ? 'from-me' : 'from-them'}${msg.is_from_me && isSms ? ' sms' : ''}`;
   if (fromThem && isGroup) msgDiv.dataset.sender = msg.sender_id || '';
+  if (msg.is_from_me) {
+    // Retained for the "notifications silenced" banner (see updateFocusBanner).
+    msgDiv.dataset.status = msg.status || '';
+    msgDiv.dataset.quiet = msg.delivered_quietly ? '1' : '0';
+  }
 
   let html = '';
 
@@ -1491,12 +1509,37 @@ function appendMessage(msg) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// Show/hide the "🌙 <name> has notifications silenced" banner. Pass an explicit
+// boolean (from a live status_update) or omit it to derive the state from the
+// most recent delivered/read outgoing bubble in the DOM (used on chat load).
+function updateFocusBanner(forceSilenced) {
+  const banner = document.getElementById('focus-banner');
+  if (!banner) return;
+  let silenced = forceSilenced;
+  if (typeof silenced !== 'boolean') {
+    silenced = false;
+    const sent = document.querySelectorAll('#messages .msg.from-me');
+    for (let i = sent.length - 1; i >= 0; i--) {
+      const s = sent[i].dataset.status;
+      if (s === 'delivered' || s === 'read') { silenced = sent[i].dataset.quiet === '1'; break; }
+    }
+  }
+  if (silenced && state.chatId) {
+    const name = (state.chatName || '').split(',')[0].trim() || 'They';
+    banner.textContent = `🌙 ${name} has notifications silenced`;
+    banner.style.display = 'block';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
 function updateLastSentStatus(status) {
   const labels = { read: 'Read', delivered: 'Delivered', sent: 'Sent' };
   const label = labels[status] || '';
   const sentMsgs = document.querySelectorAll('#messages .msg.from-me');
   if (sentMsgs.length === 0) return;
   const last = sentMsgs[sentMsgs.length - 1];
+  last.dataset.status = status;
   let el = last.querySelector('.msg-status');
   if (el) {
     el.textContent = label;
@@ -1733,6 +1776,7 @@ document.getElementById('new-msg-btn').addEventListener('click', () => {
   document.getElementById('empty-state').style.display = 'none';
   document.getElementById('messages').style.display = 'flex';
   document.getElementById('messages').innerHTML = '';
+  document.getElementById('focus-banner').style.display = 'none';
   document.getElementById('compose').style.display = 'flex';
   document.getElementById('send-btn').disabled = false;
   document.getElementById('new-msg-header').style.display = 'flex';
