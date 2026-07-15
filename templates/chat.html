@@ -889,7 +889,11 @@ function connectWS() {
     } else if (data.type === 'status_update') {
       if (data.chat_identifier === state.chatId) {
         updateLastSentStatus(data.status);
-        if (typeof data.silenced === 'boolean') updateFocusBanner(data.silenced);
+        if (typeof data.delivered_quietly === 'boolean') {
+          const sent = document.querySelectorAll('#messages .msg.from-me');
+          if (sent.length) sent[sent.length - 1].dataset.quiet = data.delivered_quietly ? '1' : '0';
+        }
+        updateFocusBanner();
       }
     } else if (data.type === 'read_sync') {
       // iPhone/Messages.app marked this chat read — clear our in-memory badge.
@@ -1507,22 +1511,25 @@ function appendMessage(msg) {
   const div = createMessageElement(msg, showAvatar);
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  // A newer message (their reply, or our latest send) may clear/set the banner.
+  updateFocusBanner();
 }
 
-// Show/hide the "🌙 <name> has notifications silenced" banner. Pass an explicit
-// boolean (from a live status_update) or omit it to derive the state from the
-// most recent delivered/read outgoing bubble in the DOM (used on chat load).
-function updateFocusBanner(forceSilenced) {
+// Show/hide the "🌙 <name> has notifications silenced" banner. Mirrors
+// Messages.app: the note only applies while YOUR quietly-delivered message is
+// the LAST message in the thread. Any newer message — a reply from them, or a
+// later message of yours that lands normally — clears it. Derived entirely from
+// the current DOM (the last .msg element), so it updates whenever messages are
+// appended or a delivery status arrives.
+function updateFocusBanner() {
   const banner = document.getElementById('focus-banner');
   if (!banner) return;
-  let silenced = forceSilenced;
-  if (typeof silenced !== 'boolean') {
-    silenced = false;
-    const sent = document.querySelectorAll('#messages .msg.from-me');
-    for (let i = sent.length - 1; i >= 0; i--) {
-      const s = sent[i].dataset.status;
-      if (s === 'delivered' || s === 'read') { silenced = sent[i].dataset.quiet === '1'; break; }
-    }
+  const msgs = document.querySelectorAll('#messages .msg');
+  const last = msgs.length ? msgs[msgs.length - 1] : null;
+  let silenced = false;
+  if (last && last.classList.contains('from-me')) {
+    const s = last.dataset.status;
+    silenced = (s === 'delivered' || s === 'read') && last.dataset.quiet === '1';
   }
   if (silenced && state.chatId) {
     const name = (state.chatName || '').split(',')[0].trim() || 'They';

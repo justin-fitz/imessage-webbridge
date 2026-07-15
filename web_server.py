@@ -201,17 +201,6 @@ class StatusPoller:
         """).fetchall()
         conn.close()
 
-        # Per-chat "notifications silenced" state: whether the most recent
-        # DELIVERED outgoing message was delivered quietly (recipient in a
-        # Focus/DND with status shared). Mirrors the banner Messages.app shows.
-        silenced_by_chat: dict[str, bool] = {}
-        for row in rows:
-            cid = row["chat_identifier"]
-            if cid in silenced_by_chat:
-                continue
-            if row["date_delivered"] and row["date_delivered"] != 0:
-                silenced_by_chat[cid] = bool(row["was_delivered_quietly"])
-
         for row in rows:
             rid = row["ROWID"]
             dr = row["date_read"]
@@ -236,7 +225,10 @@ class StatusPoller:
                         "type": "status_update",
                         "chat_identifier": row["chat_identifier"],
                         "status": s,
-                        "silenced": silenced_by_chat.get(row["chat_identifier"], False),
+                        # Quiet flag of this message, so the client can decide
+                        # whether the "notifications silenced" banner applies once
+                        # this becomes the last message in the thread.
+                        "delivered_quietly": bool(row["was_delivered_quietly"]),
                     })
 
         if len(self._status_cache) > 100:
