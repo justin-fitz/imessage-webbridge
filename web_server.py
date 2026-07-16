@@ -335,6 +335,7 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
             GROUP BY cmj.chat_id
         )
         SELECT c.chat_identifier, c.display_name, c.style, c.service_name,
+               last_msg.service AS last_service,
                last_msg.date AS last_date,
                last_msg.text AS last_text,
                last_msg.attributedBody AS last_attributed_body,
@@ -382,7 +383,10 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
             "chat_identifier": row["chat_identifier"],
             "display_name": display_name,
             "style": style,
-            "service": row["service_name"],
+            # Theme by the ACTUAL last message's service, not chat.service_name:
+            # Messages leaves the chat-level flag stale (e.g. an all-iMessage
+            # thread pinned to "RCS"), which mis-colored the composer green.
+            "service": row["last_service"] or row["service_name"],
             "last_text": last_text,
             "unread_count": row["unread_count"] or 0,
         })

@@ -161,6 +161,22 @@ def test_get_recent_chats(tmp_path):
     assert chats[1]["display_name"] == "John"
 
 
+def test_get_recent_chats_theme_service_follows_last_message(tmp_path):
+    """Composer theme must follow the last message's service, not the stale
+    chat.service_name (e.g. an all-iMessage thread pinned to RCS)."""
+    db_path = str(tmp_path / "chat.db")
+    _create_test_chatdb(db_path)
+    conn = sqlite3.connect(db_path)
+    # Chat 1 is flagged RCS at the chat level but its last message is iMessage.
+    conn.execute("UPDATE chat SET service_name='RCS' WHERE ROWID=1")
+    conn.execute("UPDATE message SET service='iMessage' WHERE ROWID=3")  # last msg of chat 1
+    conn.commit()
+    conn.close()
+    chats = get_recent_chats(db_path, {})
+    john = next(c for c in chats if c["chat_identifier"] == "+15551234567")
+    assert john["service"] == "iMessage"
+
+
 def test_get_chat_messages(tmp_path):
     db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
     messages = get_chat_messages(db_path, "+15551234567", {})
