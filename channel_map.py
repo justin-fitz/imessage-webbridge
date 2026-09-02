@@ -7,6 +7,12 @@ class ChannelMap:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
+        # WAL: several connections in this process touch bridge.db (this one, the
+        # web session store, and the read-side horizon lookup). In the default
+        # rollback-journal mode a writer takes a whole-file EXCLUSIVE lock, so a
+        # poller write and a page load would deadlock each other for the full
+        # busy timeout. WAL lets readers run concurrently with the writer.
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self._init_tables()
 
     def _init_tables(self):

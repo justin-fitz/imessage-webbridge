@@ -63,6 +63,9 @@ def _init_session_db(db_path: str):
     global _session_db, _session_db_path
     _session_db_path = db_path
     _session_db = sqlite3.connect(db_path, check_same_thread=False)
+    # See ChannelMap.__init__ — WAL is required here too, since this connection
+    # and ChannelMap's both write the same file.
+    _session_db.execute("PRAGMA journal_mode=WAL")
     _session_db.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             token TEXT PRIMARY KEY,
@@ -311,23 +314,59 @@ class WebHandler:
         await self.manager.broadcast(_sanitize(data))
 
 
+def _read_horizons() -> dict[str, int]:
+    """Load the per-chat read horizons from the state DB.
+
+    Read on a short-lived connection of its own rather than by ATTACHing the
+    state DB to the chat.db connection: the ATTACH held a lock on bridge.db for
+    the whole (slow) chat.db query, which deadlocked against the poller's
+    writes and 500'd the page. A lock or a not-yet-created DB degrades to "no
+    horizons" — badges may reappear once, which beats failing the request.
+    """
+    if not _session_db_path or not os.path.exists(_session_db_path):
+        return {}
+    try:
+        # Opened read-write, not mode=ro: a read-only connection cannot create the
+        # -shm file a WAL database needs, so it fails outright whenever no other
+        # connection happens to have the DB open. Under WAL a read-write reader
+        # still never blocks the poller's writes.
+        hconn = sqlite3.connect(_session_db_path, timeout=2.0)
+        try:
+            return {
+                r[0]: r[1]
+                for r in hconn.execute(
+                    "SELECT chat_identifier, max_rowid FROM webapp_read_horizon"
+                )
+            }
+        finally:
+            hconn.close()
+    except sqlite3.Error:
+        return {}
+
+
 def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) -> list[dict]:
     from imessage_reader import IMessageReader
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
 
-    # Attach the state DB so we can reference webapp_read_horizon in the same
-    # query without a round-trip. Falls back gracefully if the DB isn't ready yet.
-    if _session_db_path and os.path.exists(_session_db_path):
-        conn.execute("ATTACH DATABASE ? AS state_db", (_session_db_path,))
+    # Inline the horizons as a VALUES CTE. The table holds at most one row per
+    # dismissed chat, so this stays small and keeps the query single-database.
+    horizons = _read_horizons()
+    horizon_params: list = []
+    if horizons:
+        values = ", ".join(["(?, ?)"] * len(horizons))
+        for chat_id, max_rowid in horizons.items():
+            horizon_params += [chat_id, max_rowid]
+        horizon_cte = f"horizons(chat_identifier, max_rowid) AS (VALUES {values}), "
         horizon_expr = """COALESCE(
-                (SELECT max_rowid FROM state_db.webapp_read_horizon
+                (SELECT max_rowid FROM horizons
                  WHERE chat_identifier = c.chat_identifier), 0)"""
     else:
+        horizon_cte = ""
         horizon_expr = "0"
 
     rows = conn.execute(f"""
-        WITH last_msgs AS (
+        WITH {horizon_cte}last_msgs AS (
             SELECT cmj.chat_id AS chat_id, MAX(m.ROWID) AS last_rowid
             FROM message m
             JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
@@ -354,7 +393,7 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
         JOIN message last_msg ON last_msg.ROWID = lm.last_rowid
         ORDER BY last_msg.date DESC
         LIMIT ?
-    """, (limit,)).fetchall()
+    """, (*horizon_params, limit)).fetchall()
     conn.close()
 
     chats = []
@@ -817,7 +856,12 @@ def create_app(core: AppCore) -> FastAPI:
     async def index(request: Request, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             return RedirectResponse("/login", status_code=303)
-        chats = get_recent_chats(core.config.imessage.db_path, contact_store.contacts)
+        # to_thread: get_recent_chats is blocking sqlite against a ~1.5GB chat.db.
+        # Run on the loop it stalled every other task (including the poller that
+        # would release the lock it was waiting on) for the full busy timeout.
+        chats = await asyncio.to_thread(
+            get_recent_chats, core.config.imessage.db_path, contact_store.contacts
+        )
         return templates.TemplateResponse(request, "chat.html", {"chats": chats, "build_number": build_number})
 
     @app.get("/api/version")
@@ -829,7 +873,9 @@ def create_app(core: AppCore) -> FastAPI:
     async def api_chats(session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
-        return get_recent_chats(core.config.imessage.db_path, contact_store.contacts)
+        return await asyncio.to_thread(
+            get_recent_chats, core.config.imessage.db_path, contact_store.contacts
+        )
 
     @app.post("/api/contacts/sync")
     async def sync_contacts(session: str | None = Cookie(default=None, alias="session")):
