@@ -52,7 +52,7 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 _SESSION_TTL = 8 * 3600        # absolute lifetime of a login
 _SESSION_IDLE = 2 * 3600       # logged out after this long without activity
-_SEND_ARM_TTL = 30 * 60        # how long "unlock sending" lasts after re-entering the password
+_SEND_ARM_TTL = 4 * 3600      # how long "unlock sending" lasts after re-entering the password (or a passkey login)
 _session_db: sqlite3.Connection | None = None
 _session_db_path: str | None = None
 _login_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
