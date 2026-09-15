@@ -4,7 +4,9 @@ import os
 import secrets
 import sqlite3
 import time
+import threading
 import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 from fastapi import Cookie, FastAPI, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
@@ -33,7 +35,9 @@ def _sanitize(obj):
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-_SESSION_TTL = 86400  # 24 hours
+_SESSION_TTL = 8 * 3600        # absolute lifetime of a login
+_SESSION_IDLE = 2 * 3600       # logged out after this long without activity
+_SEND_ARM_TTL = 30 * 60        # how long "unlock sending" lasts after re-entering the password
 _session_db: sqlite3.Connection | None = None
 _session_db_path: str | None = None
 _login_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
@@ -59,6 +63,61 @@ def _check_send_rate(session: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Login / security notifications → Home Assistant → phone. Fire-and-forget on a
+# thread so a slow HA never delays a request. Config: web.ha_url / ha_token_file /
+# ha_notify_service in config.yaml (defaults read ~/.config/ha/{url,token}).
+_notify_cfg: dict = {}
+
+
+def _geo(ip: str) -> str:
+    if not ip or ip.startswith(("10.", "127.", "192.168.")):
+        return "LAN"
+    try:
+        with urllib.request.urlopen(f"http://ip-api.com/json/{ip}?fields=status,city,regionName,country,isp", timeout=4) as r:
+            j = json.load(r)
+        if j.get("status") == "success":
+            return f"{j.get('city')}, {j.get('regionName')} ({j.get('isp')})"
+    except Exception:
+        pass
+    return "unknown location"
+
+
+def _notify(title: str, message: str, critical: bool = False) -> None:
+    cfg = _notify_cfg
+    if not cfg.get("enabled"):
+        return
+
+    def _run():
+        try:
+            token = open(os.path.expanduser(cfg["token_file"])).read().strip()
+            url = cfg["url"].rstrip("/")
+            if not url.startswith("http"):
+                url = "http://" + url
+            svc = cfg["service"].replace("notify.", "")
+            data = {"title": title, "message": message}
+            if critical:
+                data["data"] = {"push": {"sound": {"name": "default", "critical": 1, "volume": 1.0}}}
+            req = urllib.request.Request(
+                f"{url}/api/services/notify/{svc}",
+                data=json.dumps(data).encode(),
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=8).read()
+        except Exception as e:  # never let notification failures affect the app
+            print(f"notify failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _notify_login(ip: str, ok: bool, detail: str = "") -> None:
+    where = _geo(ip)
+    if ok:
+        _notify("iMessage bridge: new login", f"From {ip} — {where}")
+    else:
+        _notify("iMessage bridge: login blocked", f"{detail} from {ip} — {where}", critical=True)
+
+
 def _init_session_db(db_path: str):
     global _session_db, _session_db_path
     _session_db_path = db_path
@@ -72,6 +131,12 @@ def _init_session_db(db_path: str):
             expiry REAL NOT NULL
         )
     """)
+    # Added 2026-09-15: idle timeout + per-session "sending unlocked until".
+    for col, ddl in (("last_seen", "REAL"), ("ip", "TEXT"), ("send_armed_until", "REAL")):
+        try:
+            _session_db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {ddl}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     # webapp_read_horizon: per-chat read dismissal persisted across page reloads.
     # Stores the highest message ROWID that was visible when the user opened a
     # chat in the web UI. get_recent_chats excludes messages at or below the
@@ -117,29 +182,67 @@ def _clear_read_horizon(chat_identifier: str) -> None:
     _session_db.commit()
 
 
-def _create_session() -> str:
+def _create_session(ip: str = "") -> str:
     token = secrets.token_urlsafe(32)
+    now = time.time()
     _session_db.execute(
-        "INSERT INTO sessions (token, expiry) VALUES (?, ?)",
-        (token, time.time() + _SESSION_TTL),
+        "INSERT INTO sessions (token, expiry, last_seen, ip, send_armed_until) VALUES (?, ?, ?, ?, 0)",
+        (token, now + _SESSION_TTL, now, ip),
     )
     _session_db.commit()
     return token
 
 
 def _valid_session(token: str | None) -> bool:
+    """True if the session exists, hasn't hit its absolute or idle limit.
+    Touches last_seen (at most once a minute) so activity keeps it alive."""
     if not token or not _session_db:
         return False
     row = _session_db.execute(
-        "SELECT expiry FROM sessions WHERE token = ?", (token,)
+        "SELECT expiry, last_seen FROM sessions WHERE token = ?", (token,)
     ).fetchone()
     if not row:
         return False
-    if time.time() > row[0]:
+    now = time.time()
+    expiry, last_seen = row[0], row[1] or now
+    if now > expiry or now - last_seen > _SESSION_IDLE:
         _session_db.execute("DELETE FROM sessions WHERE token = ?", (token,))
         _session_db.commit()
         return False
+    if now - last_seen > 60:
+        _session_db.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (now, token))
+        _session_db.commit()
     return True
+
+
+def _touch_session(token: str | None) -> None:
+    """Keep a session alive from WebSocket traffic (pongs), bypassing the 60s throttle."""
+    if token and _session_db:
+        _session_db.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (time.time(), token))
+        _session_db.commit()
+
+
+def _send_armed(token: str | None) -> float:
+    """Return the unix time until which this session may send, or 0."""
+    if not token or not _session_db:
+        return 0
+    row = _session_db.execute("SELECT send_armed_until FROM sessions WHERE token = ?", (token,)).fetchone()
+    until = (row[0] if row else 0) or 0
+    return until if until > time.time() else 0
+
+
+def _arm_send(token: str) -> float:
+    until = time.time() + _SEND_ARM_TTL
+    _session_db.execute("UPDATE sessions SET send_armed_until = ? WHERE token = ?", (until, token))
+    _session_db.commit()
+    return until
+
+
+def _logout_everywhere() -> int:
+    n = _session_db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    _session_db.execute("DELETE FROM sessions")
+    _session_db.commit()
+    return n
 
 
 class ConnectionManager:
@@ -786,6 +889,12 @@ def create_app(core: AppCore) -> FastAPI:
     status_poller = StatusPoller(core.config.imessage.db_path, manager)
     known_chats = _get_known_chat_identifiers(core.config.imessage.db_path)
     password = core.config.web.password
+    _notify_cfg.update({
+        "enabled": core.config.web.login_notify,
+        "url": core.config.web.ha_url,
+        "token_file": core.config.web.ha_token_file,
+        "service": core.config.web.ha_notify_service,
+    })
     max_msg_len = core.config.web.max_message_length
     allowed_origins = set(core.config.web.allowed_origins)
     login_rate_limit = core.config.web.login_rate_limit
@@ -826,6 +935,10 @@ def create_app(core: AppCore) -> FastAPI:
         attempts = _login_attempts.get(client_ip, [])
         attempts = [t for t in attempts if now - t < login_rate_window]
         if len(attempts) >= login_rate_limit:
+            if len(attempts) == login_rate_limit:      # notify once per lockout, not per retry
+                attempts.append(now)
+                _login_attempts[client_ip] = attempts
+                _notify_login(client_ip, ok=False, detail=f"{login_rate_limit} wrong passwords")
             return HTMLResponse(
                 LOGIN_HTML.replace("{error}", '<div class="error">Too many attempts. Try again later.</div>'),
                 status_code=429,
@@ -833,7 +946,8 @@ def create_app(core: AppCore) -> FastAPI:
 
         if not password or secrets.compare_digest(password_input, password):
             _login_attempts.pop(client_ip, None)
-            token = _create_session()
+            token = _create_session(client_ip)
+            _notify_login(client_ip, ok=True)
             resp = RedirectResponse("/", status_code=303)
             is_secure = request.url.scheme == "https"
             resp.set_cookie("session", token, httponly=True, samesite="strict", secure=is_secure, max_age=_SESSION_TTL)
@@ -851,6 +965,48 @@ def create_app(core: AppCore) -> FastAPI:
         resp = RedirectResponse("/login", status_code=303)
         resp.delete_cookie("session")
         return resp
+
+    @app.post("/logout-all")
+    async def logout_all(request: Request, session: str | None = Cookie(default=None, alias="session")):
+        """Invalidate every session on every device (panic button)."""
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        n = _logout_everywhere()
+        ip = request.client.host if request.client else "unknown"
+        _notify("iMessage bridge: logged out everywhere", f"{n} session(s) revoked from {ip}")
+        resp = RedirectResponse("/login", status_code=303)
+        resp.delete_cookie("session")
+        return resp
+
+    @app.get("/api/send/status")
+    async def send_status(session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        until = _send_armed(session)
+        return {"armed": bool(until), "until": until}
+
+    @app.post("/api/send/arm")
+    async def send_arm(request: Request, session: str | None = Cookie(default=None, alias="session")):
+        """Sessions are read-only until the password is re-entered; then sending is
+        allowed for _SEND_ARM_TTL. Shares the login rate limiter so it can't be brute-forced."""
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        if not password:
+            return {"armed": True, "until": time.time() + _SEND_ARM_TTL}
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.time()
+        attempts = [t for t in _login_attempts.get(client_ip, []) if now - t < login_rate_window]
+        if len(attempts) >= login_rate_limit:
+            raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
+        body = await request.json()
+        if not secrets.compare_digest(str(body.get("password", "")), password):
+            attempts.append(now)
+            _login_attempts[client_ip] = attempts
+            raise HTTPException(status_code=401, detail="Invalid password")
+        _login_attempts.pop(client_ip, None)
+        until = _arm_send(session)
+        _notify("iMessage bridge: sending unlocked", f"From {client_ip} — {_geo(client_ip)} for {_SEND_ARM_TTL // 60} min")
+        return {"armed": True, "until": until}
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request, session: str | None = Cookie(default=None, alias="session")):
@@ -918,6 +1074,8 @@ def create_app(core: AppCore) -> FastAPI:
     async def send_new_message(request: Request, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
+        if password and not _send_armed(session):
+            raise HTTPException(status_code=403, detail="send_locked")
         if not _check_send_rate(session or ""):
             raise HTTPException(status_code=429, detail="Send rate limit exceeded; slow down.")
         body = await request.json()
@@ -1005,6 +1163,8 @@ def create_app(core: AppCore) -> FastAPI:
     async def upload_file(file: UploadFile, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
+        if password and not _send_armed(session):
+            raise HTTPException(status_code=403, detail="send_locked")
         if file.content_type and file.content_type not in _UPLOAD_ALLOWED_TYPES:
             raise HTTPException(status_code=400, detail=f"File type not allowed: {file.content_type}")
         data = await file.read(_UPLOAD_MAX + 1)
@@ -1060,7 +1220,8 @@ def create_app(core: AppCore) -> FastAPI:
                     continue
                 msg = json.loads(data)
                 if msg.get("type") == "pong":
-                    continue  # client is alive, no-op
+                    _touch_session(session_token)  # client is alive → keeps idle timer fresh
+                    continue
                 if msg.get("type") == "send":
                     chat_id = msg.get("chat_identifier", "")
                     chat_style = msg.get("chat_style", 45)
@@ -1068,6 +1229,10 @@ def create_app(core: AppCore) -> FastAPI:
                     file_path = msg.get("file_path", "")
 
                     if chat_id not in known_chats:
+                        continue
+                    if password and not _send_armed(session_token):
+                        await ws.send_text(json.dumps({"type": "error", "code": "send_locked",
+                                                       "message": "Sending is locked — unlock with your password"}))
                         continue
                     if not _check_send_rate(session_token):
                         await ws.send_text(json.dumps({"type": "error", "message": "Send rate limit exceeded"}))

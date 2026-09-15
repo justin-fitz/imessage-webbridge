@@ -14,6 +14,11 @@ class WebConfig:
     max_message_length: int = 10000
     login_rate_limit: int = 5
     login_rate_window: int = 300
+    # Security notifications (login, lockout, send-unlock) via Home Assistant → phone
+    login_notify: bool = True
+    ha_url: str = "http://10.0.10.202:8123"
+    ha_token_file: str = "~/.config/ha/token"
+    ha_notify_service: str = "notify.mobile_app_js_iphone"
 
 
 @dataclass
@@ -66,6 +71,10 @@ def load_config(path: str) -> Config:
         max_message_length=w.get("max_message_length", 10000),
         login_rate_limit=w.get("login_rate_limit", 5),
         login_rate_window=w.get("login_rate_window", 300),
+        login_notify=w.get("login_notify", True),
+        ha_url=w.get("ha_url", "http://10.0.10.202:8123"),
+        ha_token_file=w.get("ha_token_file", "~/.config/ha/token"),
+        ha_notify_service=w.get("ha_notify_service", "notify.mobile_app_js_iphone"),
     )
 
     _validate_web_config(web_cfg)
