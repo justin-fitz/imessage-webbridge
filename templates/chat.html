@@ -719,6 +719,16 @@
         <button id="sync-contacts-btn" style="padding:6px 14px;background:#0b84fe;color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;flex-shrink:0;margin-left:12px">Sync</button>
       </div>
     </div>
+    <div class="pref-row" style="flex-direction:column;align-items:stretch" id="passkey-row">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div class="pref-label">Passkeys</div>
+          <div class="pref-desc">Sign in with Touch ID / Face ID / Windows Hello instead of the password</div>
+        </div>
+        <button id="add-passkey-btn" style="padding:6px 14px;background:#0b84fe;color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;flex-shrink:0;margin-left:12px">Add this device</button>
+      </div>
+      <div id="passkey-list" style="margin-top:8px;font-size:12px;color:#bbb"></div>
+    </div>
     <button id="prefs-close">Done</button>
     <button id="logout-btn" onclick="window.location.href='/logout'" style="margin-top:8px;width:100%;padding:8px;background:#ff3b30;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer">Logout</button>
     <form method="POST" action="/logout-all" onsubmit="return confirm('Log out every device and browser that is signed in to the bridge?')" style="margin:0">
@@ -818,12 +828,74 @@ document.getElementById('unlock-form').addEventListener('submit', async (e) => {
       const j = await r.json(); state.sendArmedUntil = j.until; renderSendLock();
       document.getElementById('unlock-modal').style.display = 'none';
       if (state.pendingSend) { state.pendingSend = false; sendMessage(); }
+      document.getElementById('unlock-form').dispatchEvent(new Event('unlocked'));
     } else if (r.status === 429) { err.textContent = 'Too many attempts. Try again later.'; }
     else { err.textContent = 'Invalid password'; }
   } catch (e) { err.textContent = 'Network error'; }
 });
 setInterval(renderSendLock, 30000);
 refreshSendStatus();
+
+// --- Passkeys (WebAuthn) ---
+const b64u = {
+  dec: s => Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0)),
+  enc: b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/[+]/g,'-').replace(/[/]/g,'_').replace(/=+$/,''),
+};
+async function loadPasskeys() {
+  const el = document.getElementById('passkey-list');
+  try {
+    const r = await fetch('/api/passkeys'); if (!r.ok) return;
+    const keys = await r.json();
+    if (!keys.length) { el.innerHTML = '<i>No passkeys enrolled yet.</i>'; return; }
+    el.innerHTML = keys.map(k => {
+      const used = k.last_used_at ? new Date(k.last_used_at*1000).toLocaleDateString() : 'never';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-top:1px solid #333">
+        <span>&#128273; ${k.name.replace(/</g,'&lt;')} <span style="color:#777">· last used ${used}</span></span>
+        <button data-id="${k.id}" class="pk-del" style="background:none;border:none;color:#ff3b30;cursor:pointer;font-size:12px">Remove</button></div>`;
+    }).join('');
+    el.querySelectorAll('.pk-del').forEach(b => b.addEventListener('click', () => removePasskey(b.dataset.id)));
+  } catch (e) {}
+}
+async function ensureArmedThen(fn) {
+  if (sendArmed()) return fn();
+  state.pendingSend = false; openUnlock();
+  const form = document.getElementById('unlock-form');
+  const once = () => { form.removeEventListener('unlocked', once); fn(); };
+  form.addEventListener('unlocked', once);
+}
+async function addPasskey() {
+  const name = prompt('Name this passkey (e.g. "iPhone", "Work laptop"):', navigator.platform || 'Device');
+  if (!name) return;
+  try {
+    const r = await fetch('/api/passkeys/register/options', {method:'POST'});
+    if (r.status === 403) { ensureArmedThen(addPasskey); return; }
+    if (!r.ok) { alert('Could not start passkey enrolment'); return; }
+    const {challenge_id, options} = await r.json();
+    options.challenge = b64u.dec(options.challenge);
+    options.user.id = b64u.dec(options.user.id);
+    (options.excludeCredentials||[]).forEach(c => c.id = b64u.dec(c.id));
+    const cred = await navigator.credentials.create({publicKey: options});
+    const body = {challenge_id, name, credential: {
+      id: cred.id, rawId: b64u.enc(cred.rawId), type: cred.type,
+      response: {
+        attestationObject: b64u.enc(cred.response.attestationObject),
+        clientDataJSON: b64u.enc(cred.response.clientDataJSON),
+        transports: cred.response.getTransports ? cred.response.getTransports() : [],
+      }}};
+    const v = await fetch('/api/passkeys/register/verify', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if (!v.ok) { const j = await v.json().catch(()=>({})); alert('Enrolment failed: ' + (j.detail || v.status)); }
+  } catch (e) { if (e.name !== 'NotAllowedError') alert('Passkey enrolment failed: ' + e.message); }
+  loadPasskeys();
+}
+async function removePasskey(id) {
+  if (!confirm('Remove this passkey?')) return;
+  const r = await fetch('/api/passkeys/' + encodeURIComponent(id), {method:'DELETE'});
+  if (r.status === 403) { ensureArmedThen(() => removePasskey(id)); return; }
+  loadPasskeys();
+}
+document.getElementById('add-passkey-btn').addEventListener('click', addPasskey);
+if (!window.PublicKeyCredential) document.getElementById('passkey-row').style.display = 'none';
+loadPasskeys();
 
 // --- WebSocket ---
 let _wsReconnectTimer = null;

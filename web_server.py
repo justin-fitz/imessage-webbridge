@@ -14,6 +14,21 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from webauthn import (
+    base64url_to_bytes,
+    generate_authentication_options,
+    generate_registration_options,
+    options_to_json,
+    verify_authentication_response,
+    verify_registration_response,
+)
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
+
 from app_core import AppCore
 from contacts import find_group_chat, get_group_members, load_contacts, resolve_identifier, search_contacts
 from imessage_reader import APPLE_EPOCH_OFFSET
@@ -151,6 +166,18 @@ def _init_session_db(db_path: str):
             dismissed_at    REAL    NOT NULL
         )
     """)
+    # Passkeys (WebAuthn). One row per enrolled device/authenticator.
+    _session_db.execute("""
+        CREATE TABLE IF NOT EXISTS passkeys (
+            credential_id TEXT PRIMARY KEY,
+            public_key    BLOB NOT NULL,
+            sign_count    INTEGER NOT NULL DEFAULT 0,
+            name          TEXT NOT NULL,
+            transports    TEXT,
+            created_at    REAL NOT NULL,
+            last_used_at  REAL
+        )
+    """)
     _session_db.execute("DROP TABLE IF EXISTS chat_read_state")
     _session_db.execute("DELETE FROM sessions WHERE expiry < ?", (time.time(),))
     _session_db.commit()
@@ -243,6 +270,49 @@ def _logout_everywhere() -> int:
     _session_db.execute("DELETE FROM sessions")
     _session_db.commit()
     return n
+
+
+# ---------------------------------------------------------------------------
+# Passkeys (WebAuthn). Phishing-resistant, biometric login. Challenges are held
+# in memory for a few minutes keyed by a random id the browser echoes back.
+_PASSKEY_USER_ID = b"imessage-bridge-owner"
+_challenges: dict[str, tuple[bytes, float, str]] = {}   # id -> (challenge, expiry, purpose)
+_CHALLENGE_TTL = 300
+
+
+def _new_challenge(challenge: bytes, purpose: str) -> str:
+    now = time.time()
+    for k, (_, exp, _) in list(_challenges.items()):
+        if exp < now:
+            _challenges.pop(k, None)
+    cid = secrets.token_urlsafe(16)
+    _challenges[cid] = (challenge, now + _CHALLENGE_TTL, purpose)
+    return cid
+
+
+def _take_challenge(cid: str, purpose: str) -> bytes | None:
+    item = _challenges.pop(cid or "", None)
+    if not item or item[1] < time.time() or item[2] != purpose:
+        return None
+    return item[0]
+
+
+def _passkeys() -> list[dict]:
+    rows = _session_db.execute(
+        "SELECT credential_id, public_key, sign_count, name, transports, created_at, last_used_at FROM passkeys ORDER BY created_at"
+    ).fetchall()
+    return [dict(credential_id=r[0], public_key=r[1], sign_count=r[2], name=r[3],
+                 transports=json.loads(r[4]) if r[4] else [], created_at=r[5], last_used_at=r[6]) for r in rows]
+
+
+def _rp(request: Request) -> tuple[str, str]:
+    """(rp_id, origin) for this request — the hostname the browser sees.
+    Behind caddy uvicorn honors X-Forwarded-Proto/Host, so this is home.studiox.net/https."""
+    host = request.url.hostname or "localhost"
+    scheme = request.url.scheme
+    port = request.url.port
+    origin = f"{scheme}://{host}" + (f":{port}" if port and port not in (80, 443) else "")
+    return host, origin
 
 
 class ConnectionManager:
@@ -830,8 +900,39 @@ LOGIN_HTML = """<!DOCTYPE html>
   <h2>iMessage Web Gateway</h2>
   <input type="password" name="password" placeholder="Password" autofocus>
   <button type="submit">Login</button>
+  <button type="button" id="pk-btn" style="background:#2c2c2e;margin-top:8px">&#128273; Sign in with passkey</button>
+  <div class="error" id="pk-err"></div>
   {error}
 </form>
+<script>
+const b64u = {
+  dec: s => Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0)),
+  enc: b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/[+]/g,'-').replace(/[/]/g,'_').replace(/=+$/,''),
+};
+async function passkeyLogin() {
+  const err = document.getElementById('pk-err'); err.textContent = '';
+  try {
+    const r = await fetch('/login/passkey/options', {method:'POST'});
+    const {challenge_id, options} = await r.json();
+    options.challenge = b64u.dec(options.challenge);
+    (options.allowCredentials||[]).forEach(c => c.id = b64u.dec(c.id));
+    const cred = await navigator.credentials.get({publicKey: options});
+    const body = {challenge_id, credential: {
+      id: cred.id, rawId: b64u.enc(cred.rawId), type: cred.type,
+      response: {
+        authenticatorData: b64u.enc(cred.response.authenticatorData),
+        clientDataJSON: b64u.enc(cred.response.clientDataJSON),
+        signature: b64u.enc(cred.response.signature),
+        userHandle: cred.response.userHandle ? b64u.enc(cred.response.userHandle) : null,
+      }}};
+    const v = await fetch('/login/passkey/verify', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if (v.ok) { window.location.href = '/'; return; }
+    err.textContent = v.status === 429 ? 'Too many attempts. Try again later.' : 'Passkey not recognised';
+  } catch (e) { if (e.name !== 'NotAllowedError') err.textContent = 'Passkey sign-in failed'; }
+}
+document.getElementById('pk-btn').addEventListener('click', passkeyLogin);
+if (!window.PublicKeyCredential) document.getElementById('pk-btn').style.display = 'none';
+</script>
 </body></html>"""
 
 
@@ -1007,6 +1108,117 @@ def create_app(core: AppCore) -> FastAPI:
         until = _arm_send(session)
         _notify("iMessage bridge: sending unlocked", f"From {client_ip} — {_geo(client_ip)} for {_SEND_ARM_TTL // 60} min")
         return {"armed": True, "until": until}
+
+    # ---- passkeys: enrolment (must already be logged in) ----
+    @app.post("/api/passkeys/register/options")
+    async def passkey_register_options(request: Request, session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        if password and not _send_armed(session):
+            raise HTTPException(status_code=403, detail="send_locked")   # re-enter password before adding a key
+        rp_id, _ = _rp(request)
+        opts = generate_registration_options(
+            rp_id=rp_id, rp_name="iMessage Bridge",
+            user_id=_PASSKEY_USER_ID, user_name="justin", user_display_name="Justin",
+            exclude_credentials=[PublicKeyCredentialDescriptor(id=base64url_to_bytes(k["credential_id"])) for k in _passkeys()],
+            authenticator_selection=AuthenticatorSelectionCriteria(
+                resident_key=ResidentKeyRequirement.REQUIRED,
+                user_verification=UserVerificationRequirement.REQUIRED,
+            ),
+        )
+        cid = _new_challenge(opts.challenge, "register")
+        return {"challenge_id": cid, "options": json.loads(options_to_json(opts))}
+
+    @app.post("/api/passkeys/register/verify")
+    async def passkey_register_verify(request: Request, session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        body = await request.json()
+        challenge = _take_challenge(body.get("challenge_id", ""), "register")
+        if not challenge:
+            raise HTTPException(status_code=400, detail="challenge expired; try again")
+        rp_id, origin = _rp(request)
+        try:
+            v = verify_registration_response(
+                credential=body["credential"], expected_challenge=challenge,
+                expected_rp_id=rp_id, expected_origin=origin, require_user_verification=True,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"registration failed: {e}")
+        name = (body.get("name") or "Passkey").strip()[:60]
+        transports = body.get("credential", {}).get("response", {}).get("transports") or []
+        from webauthn.helpers import bytes_to_base64url
+        _session_db.execute(
+            "INSERT INTO passkeys (credential_id, public_key, sign_count, name, transports, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (bytes_to_base64url(v.credential_id), v.credential_public_key, v.sign_count, name, json.dumps(transports), time.time()),
+        )
+        _session_db.commit()
+        ip = request.client.host if request.client else "unknown"
+        _notify("iMessage bridge: passkey added", f"'{name}' enrolled from {ip} — {_geo(ip)}")
+        return {"ok": True}
+
+    @app.get("/api/passkeys")
+    async def passkey_list(session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        return [{"id": k["credential_id"], "name": k["name"], "created_at": k["created_at"], "last_used_at": k["last_used_at"]}
+                for k in _passkeys()]
+
+    @app.delete("/api/passkeys/{credential_id}")
+    async def passkey_delete(credential_id: str, request: Request, session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        if password and not _send_armed(session):
+            raise HTTPException(status_code=403, detail="send_locked")
+        row = _session_db.execute("SELECT name FROM passkeys WHERE credential_id = ?", (credential_id,)).fetchone()
+        _session_db.execute("DELETE FROM passkeys WHERE credential_id = ?", (credential_id,))
+        _session_db.commit()
+        ip = request.client.host if request.client else "unknown"
+        _notify("iMessage bridge: passkey removed", f"'{row[0] if row else credential_id[:8]}' removed from {ip} — {_geo(ip)}")
+        return {"ok": True}
+
+    # ---- passkeys: login (no session needed) ----
+    @app.post("/login/passkey/options")
+    async def passkey_login_options(request: Request):
+        rp_id, _ = _rp(request)
+        opts = generate_authentication_options(rp_id=rp_id, user_verification=UserVerificationRequirement.REQUIRED)
+        cid = _new_challenge(opts.challenge, "login")
+        return {"challenge_id": cid, "options": json.loads(options_to_json(opts))}
+
+    @app.post("/login/passkey/verify")
+    async def passkey_login_verify(request: Request):
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.time()
+        attempts = [t for t in _login_attempts.get(client_ip, []) if now - t < login_rate_window]
+        if len(attempts) >= login_rate_limit:
+            raise HTTPException(status_code=429, detail="Too many attempts")
+        body = await request.json()
+        challenge = _take_challenge(body.get("challenge_id", ""), "login")
+        cred = body.get("credential") or {}
+        key = next((k for k in _passkeys() if k["credential_id"] == cred.get("id")), None)
+        if not challenge or not key:
+            attempts.append(now); _login_attempts[client_ip] = attempts
+            raise HTTPException(status_code=401, detail="unknown passkey")
+        rp_id, origin = _rp(request)
+        try:
+            v = verify_authentication_response(
+                credential=cred, expected_challenge=challenge, expected_rp_id=rp_id, expected_origin=origin,
+                credential_public_key=key["public_key"], credential_current_sign_count=key["sign_count"],
+                require_user_verification=True,
+            )
+        except Exception as e:
+            attempts.append(now); _login_attempts[client_ip] = attempts
+            raise HTTPException(status_code=401, detail=f"passkey rejected: {e}")
+        _session_db.execute("UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE credential_id = ?",
+                            (v.new_sign_count, now, key["credential_id"]))
+        _session_db.commit()
+        _login_attempts.pop(client_ip, None)
+        token = _create_session(client_ip)
+        _arm_send(token)        # biometric + phishing-resistant → sending unlocked without a second prompt
+        _notify("iMessage bridge: passkey login", f"'{key['name']}' from {client_ip} — {_geo(client_ip)}")
+        resp = Response(content='{"ok": true}', media_type="application/json")
+        resp.set_cookie("session", token, httponly=True, samesite="strict", secure=(request.url.scheme == "https"), max_age=_SESSION_TTL)
+        return resp
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request, session: str | None = Cookie(default=None, alias="session")):
