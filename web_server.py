@@ -1045,7 +1045,7 @@ def create_app(core: AppCore) -> FastAPI:
                 status_code=429,
             )
 
-        if not password or secrets.compare_digest(password_input, password):
+        if not password or secrets.compare_digest(password_input.encode(), password.encode()):
             _login_attempts.pop(client_ip, None)
             token = _create_session(client_ip)
             _notify_login(client_ip, ok=True)
@@ -1100,7 +1100,7 @@ def create_app(core: AppCore) -> FastAPI:
         if len(attempts) >= login_rate_limit:
             raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
         body = await request.json()
-        if not secrets.compare_digest(str(body.get("password", "")), password):
+        if not secrets.compare_digest(str(body.get("password", "")).encode(), password.encode()):
             attempts.append(now)
             _login_attempts[client_ip] = attempts
             raise HTTPException(status_code=401, detail="Invalid password")
