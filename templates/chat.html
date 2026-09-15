@@ -765,7 +765,9 @@
 <div id="unlock-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center">
   <form id="unlock-form" style="background:#222;padding:24px;border-radius:12px;width:280px;text-align:center">
     <div style="font-size:15px;margin-bottom:12px">&#128274; Unlock sending</div>
-    <div style="font-size:12px;color:#999;margin-bottom:12px">Re-enter the bridge password to allow sending for 4 hours.</div>
+    <div style="font-size:12px;color:#999;margin-bottom:12px">Confirm it's you to allow sending for 4 hours.</div>
+    <button type="button" id="unlock-passkey" style="display:none;width:100%;padding:10px;margin-bottom:10px;background:#0b84fe;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">&#128273; Use passkey</button>
+    <div id="unlock-or" style="display:none;font-size:11px;color:#666;margin-bottom:8px">or enter the password</div>
     <input id="unlock-pw" type="password" placeholder="Password" autocomplete="current-password" style="width:100%;padding:10px 14px;border:1px solid #444;border-radius:8px;background:#2a2a2a;color:#e0e0e0;font-size:14px;box-sizing:border-box">
     <div id="unlock-error" style="color:#ff3b30;font-size:12px;margin-top:8px;min-height:14px"></div>
     <button type="submit" style="width:100%;padding:10px;margin-top:8px;background:#0b84fe;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">Unlock</button>
@@ -787,6 +789,7 @@ const state = {
   hasMore: true,
   sendArmedUntil: 0,   // unix seconds; 0 = sending locked
   pendingSend: false,  // retry sendMessage() after a successful unlock
+  passkeyCount: 0,     // enrolled passkeys → offer Touch ID / Face ID in the unlock prompt
 };
 
 // --- Send lock (read-only sessions) ---
@@ -813,8 +816,37 @@ function openUnlock() {
   const m = document.getElementById('unlock-modal');
   m.style.display = 'flex';
   document.getElementById('unlock-error').textContent = '';
-  const pw = document.getElementById('unlock-pw'); pw.value = ''; pw.focus();
+  const pw = document.getElementById('unlock-pw'); pw.value = '';
+  const pkBtn = document.getElementById('unlock-passkey');
+  if (state.passkeyCount > 0 && window.PublicKeyCredential) {
+    pkBtn.style.display = 'block'; document.getElementById('unlock-or').style.display = 'block';
+    pkBtn.focus();
+  } else { pkBtn.style.display = 'none'; document.getElementById('unlock-or').style.display = 'none'; pw.focus(); }
 }
+function unlockSucceeded(until) {
+  state.sendArmedUntil = until; renderSendLock();
+  document.getElementById('unlock-modal').style.display = 'none';
+  if (state.pendingSend) { state.pendingSend = false; sendMessage(); }
+  document.getElementById('unlock-form').dispatchEvent(new Event('unlocked'));
+}
+async function unlockWithPasskey() {
+  const err = document.getElementById('unlock-error'); err.textContent = '';
+  try {
+    const r = await fetch('/api/send/arm/passkey/options', {method:'POST'});
+    if (!r.ok) { err.textContent = 'Passkey unavailable'; return; }
+    const {challenge_id, options} = await r.json();
+    options.challenge = b64u.dec(options.challenge);
+    (options.allowCredentials||[]).forEach(c => c.id = b64u.dec(c.id));
+    const cred = await navigator.credentials.get({publicKey: options});
+    const body = {challenge_id, credential: { id: cred.id, rawId: b64u.enc(cred.rawId), type: cred.type,
+      response: { authenticatorData: b64u.enc(cred.response.authenticatorData), clientDataJSON: b64u.enc(cred.response.clientDataJSON),
+                  signature: b64u.enc(cred.response.signature), userHandle: cred.response.userHandle ? b64u.enc(cred.response.userHandle) : null }}};
+    const v = await fetch('/api/send/arm/passkey/verify', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if (v.ok) { const j = await v.json(); unlockSucceeded(j.until); }
+    else err.textContent = v.status === 429 ? 'Too many attempts. Try again later.' : 'Passkey not recognised';
+  } catch (e) { if (e.name !== 'NotAllowedError') err.textContent = 'Passkey failed'; }
+}
+document.getElementById('unlock-passkey').addEventListener('click', unlockWithPasskey);
 function closeUnlock() { document.getElementById('unlock-modal').style.display = 'none'; state.pendingSend = false; }
 document.getElementById('send-lock-btn').addEventListener('click', () => { if (!sendArmed()) openUnlock(); });
 document.getElementById('unlock-cancel').addEventListener('click', closeUnlock);
@@ -825,10 +857,7 @@ document.getElementById('unlock-form').addEventListener('submit', async (e) => {
   try {
     const r = await fetch('/api/send/arm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
     if (r.ok) {
-      const j = await r.json(); state.sendArmedUntil = j.until; renderSendLock();
-      document.getElementById('unlock-modal').style.display = 'none';
-      if (state.pendingSend) { state.pendingSend = false; sendMessage(); }
-      document.getElementById('unlock-form').dispatchEvent(new Event('unlocked'));
+      const j = await r.json(); unlockSucceeded(j.until);
     } else if (r.status === 429) { err.textContent = 'Too many attempts. Try again later.'; }
     else { err.textContent = 'Invalid password'; }
   } catch (e) { err.textContent = 'Network error'; }
@@ -846,6 +875,7 @@ async function loadPasskeys() {
   try {
     const r = await fetch('/api/passkeys'); if (!r.ok) return;
     const keys = await r.json();
+    state.passkeyCount = keys.length;
     if (!keys.length) { el.innerHTML = '<i>No passkeys enrolled yet.</i>'; return; }
     el.innerHTML = keys.map(k => {
       const used = k.last_used_at ? new Date(k.last_used_at*1000).toLocaleDateString() : 'never';

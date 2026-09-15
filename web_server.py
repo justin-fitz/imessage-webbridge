@@ -1109,6 +1109,33 @@ def create_app(core: AppCore) -> FastAPI:
         _notify("iMessage bridge: sending unlocked", f"From {client_ip} — {_geo(client_ip)} for {_SEND_ARM_TTL // 60} min")
         return {"armed": True, "until": until}
 
+    @app.post("/api/send/arm/passkey/options")
+    async def send_arm_passkey_options(request: Request, session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        if not _passkeys():
+            raise HTTPException(status_code=404, detail="no passkeys enrolled")
+        rp_id, _ = _rp(request)
+        opts = generate_authentication_options(rp_id=rp_id, user_verification=UserVerificationRequirement.REQUIRED)
+        return {"challenge_id": _new_challenge(opts.challenge, "arm"), "options": json.loads(options_to_json(opts))}
+
+    @app.post("/api/send/arm/passkey/verify")
+    async def send_arm_passkey_verify(request: Request, session: str | None = Cookie(default=None, alias="session")):
+        """Unlock sending with Touch ID / Face ID instead of the password."""
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        key = await _verify_passkey(request, "arm")
+        until = _arm_send(session)
+        client_ip = request.client.host if request.client else "unknown"
+        _notify("iMessage bridge: sending unlocked", f"'{key['name']}' passkey from {client_ip} — {_geo(client_ip)}")
+        return {"armed": True, "until": until}
+
+    @app.get("/api/passkeys/available")
+    async def passkeys_available(session: str | None = Cookie(default=None, alias="session")):
+        if password and not _valid_session(session):
+            raise HTTPException(status_code=401)
+        return {"count": len(_passkeys())}
+
     # ---- passkeys: enrolment (must already be logged in) ----
     @app.post("/api/passkeys/register/options")
     async def passkey_register_options(request: Request, session: str | None = Cookie(default=None, alias="session")):
@@ -1185,15 +1212,16 @@ def create_app(core: AppCore) -> FastAPI:
         cid = _new_challenge(opts.challenge, "login")
         return {"challenge_id": cid, "options": json.loads(options_to_json(opts))}
 
-    @app.post("/login/passkey/verify")
-    async def passkey_login_verify(request: Request):
+    async def _verify_passkey(request: Request, purpose: str) -> dict:
+        """Shared by passkey login and passkey send-unlock. Rate-limited like passwords.
+        Returns the matched key row on success, raises HTTPException otherwise."""
         client_ip = request.client.host if request.client else "unknown"
         now = time.time()
         attempts = [t for t in _login_attempts.get(client_ip, []) if now - t < login_rate_window]
         if len(attempts) >= login_rate_limit:
             raise HTTPException(status_code=429, detail="Too many attempts")
         body = await request.json()
-        challenge = _take_challenge(body.get("challenge_id", ""), "login")
+        challenge = _take_challenge(body.get("challenge_id", ""), purpose)
         cred = body.get("credential") or {}
         key = next((k for k in _passkeys() if k["credential_id"] == cred.get("id")), None)
         if not challenge or not key:
@@ -1213,6 +1241,12 @@ def create_app(core: AppCore) -> FastAPI:
                             (v.new_sign_count, now, key["credential_id"]))
         _session_db.commit()
         _login_attempts.pop(client_ip, None)
+        return key
+
+    @app.post("/login/passkey/verify")
+    async def passkey_login_verify(request: Request):
+        client_ip = request.client.host if request.client else "unknown"
+        key = await _verify_passkey(request, "login")
         token = _create_session(client_ip)
         _arm_send(token)        # biometric + phishing-resistant → sending unlocked without a second prompt
         _notify("iMessage bridge: passkey login", f"'{key['name']}' from {client_ip} — {_geo(client_ip)}")
