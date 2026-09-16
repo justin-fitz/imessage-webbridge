@@ -203,6 +203,74 @@ end tell
 """.replace("%CHAT_ID%", _as_str(chat_id)).replace("%FILE%", _as_str(file_path))
             return self._run_applescript(script, env_file=file_path)
 
+    def create_group_and_send(self, recipients: list[str], text: str, db_path: str) -> tuple[bool, str | None, str]:
+        """Start a NEW group thread with `recipients` by sending `text` to it.
+
+        Messages has no reliable scripting call for this, so try in order:
+          1. AppleScript `make new text chat` (works on some macOS builds).
+          2. Open Messages' compose URL (sms:a,b?body=...) which pre-fills a new
+             group draft, then press Return via System Events. Needs Accessibility
+             for the bridge's python (System Settings > Privacy > Accessibility).
+        Either way, success is only claimed once chat.db shows a group whose
+        members exactly match `recipients`. Returns (ok, chat_identifier, error).
+        """
+        from contacts import find_group_chat
+        for r in recipients:
+            if not _BUDDY_PATTERN.match(r):
+                return False, None, f"invalid recipient {r!r}"
+        parts = ", ".join(f'participant "{_as_str(r)}" of targetService' for r in recipients)
+        attempts: list[str] = []
+
+        # 1. scripting API
+        script = """
+tell application "Messages"
+    set targetService to 1st service whose service type = iMessage
+    set theChat to make new text chat with properties {participants:{%PARTS%}}
+    send (system attribute "IMSG_TEXT") to theChat
+end tell
+""".replace("%PARTS%", parts)
+        env = os.environ.copy(); env["IMSG_TEXT"] = text
+        res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=15, env=env)
+        if res.returncode == 0:
+            found = self._wait_for_group(db_path, recipients, find_group_chat)
+            if found:
+                return True, found, ""
+            attempts.append("make new text chat: rc=0 but no chat appeared")
+        else:
+            attempts.append(f"make new text chat: {res.stderr.strip()[:160]}")
+
+        # 2. compose URL + Return
+        from urllib.parse import quote
+        url = "sms:" + ",".join(recipients) + "?body=" + quote(text, safe="")
+        script2 = """
+tell application "Messages" to activate
+delay 0.5
+open location "%URL%"
+delay 2.5
+tell application "System Events" to tell process "Messages" to keystroke return
+""".replace("%URL%", _as_str(url))
+        res = subprocess.run(["osascript", "-e", script2], capture_output=True, text=True, timeout=20)
+        if res.returncode != 0:
+            attempts.append(f"compose URL: {res.stderr.strip()[:160]}")
+            print("[IMSG-GROUP] " + " | ".join(attempts), flush=True)
+            return False, None, " | ".join(attempts)
+        found = self._wait_for_group(db_path, recipients, find_group_chat, timeout=8.0)
+        if found:
+            return True, found, ""
+        attempts.append("compose URL: sent Return but no matching group appeared in chat.db")
+        print("[IMSG-GROUP] " + " | ".join(attempts), flush=True)
+        return False, None, " | ".join(attempts)
+
+    @staticmethod
+    def _wait_for_group(db_path: str, recipients: list[str], find_group_chat, timeout: float = 6.0) -> str | None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            g = find_group_chat(db_path, recipients)
+            if g:
+                return g[0]
+            time.sleep(0.5)
+        return None
+
     @staticmethod
     def _run_applescript(script: str, env_text: str | None = None, env_file: str | None = None) -> bool:
         env = os.environ.copy()

@@ -454,19 +454,36 @@ class StatusPoller:
             self._read_cache = {k: v for k, v in self._read_cache.items() if k in keep}
 
 
+def group_display_name(db_path: str, chat_identifier: str, contacts: dict[str, str]) -> str:
+    """Name for an unnamed group chat: the members, resolved through Contacts."""
+    members = get_group_members(db_path, chat_identifier)
+    return ", ".join(resolve_identifier(m, contacts) or m for m in members)
+
+
 class WebHandler:
-    def __init__(self, manager: ConnectionManager, contacts: dict[str, str] | None = None):
+    def __init__(self, manager: ConnectionManager, contacts: dict[str, str] | None = None, db_path: str = ""):
         self.manager = manager
         self.contacts = contacts or {}
+        self.db_path = db_path
+        self._group_names: dict[str, str] = {}   # chat_identifier -> resolved member list
 
     async def forward_to_output(self, msg: ChatMessage):
         sender_name = msg.sender_id
         if msg.sender_id and msg.sender_id != "me":
             sender_name = resolve_identifier(msg.sender_id, self.contacts) or msg.sender_id
+        # Unnamed group chats have an empty display_name in chat.db. Fill it with
+        # the member list so a brand-new thread appearing live in the sidebar is
+        # labelled "Ty, Katie, Luis" rather than whoever spoke first.
+        chat_display_name = msg.chat_display_name
+        if not chat_display_name and msg.chat_style == 43 and self.db_path:
+            chat_display_name = self._group_names.get(msg.chat_identifier)
+            if chat_display_name is None:
+                chat_display_name = await asyncio.to_thread(group_display_name, self.db_path, msg.chat_identifier, self.contacts)
+                self._group_names[msg.chat_identifier] = chat_display_name
         data = {
             "type": "message",
             "chat_identifier": msg.chat_identifier,
-            "chat_display_name": msg.chat_display_name,
+            "chat_display_name": chat_display_name,
             "chat_style": msg.chat_style,
             "service": msg.service,
             "sender_id": sender_name,
@@ -575,9 +592,7 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
         style = row["style"]
         if not display_name:
             if style == 43:
-                members = get_group_members(db_path, row["chat_identifier"])
-                member_names = [resolve_identifier(m, contacts) or m for m in members]
-                display_name = ", ".join(member_names)
+                display_name = group_display_name(db_path, row["chat_identifier"], contacts)
             else:
                 display_name = resolve_identifier(row["chat_identifier"], contacts) or row["chat_identifier"]
 
@@ -984,7 +999,7 @@ def create_app(core: AppCore) -> FastAPI:
         pass
     manager = ConnectionManager(max_connections=core.config.web.max_connections)
     contact_store = ContactStore()
-    web_handler = WebHandler(manager, contact_store.contacts)
+    web_handler = WebHandler(manager, contact_store.contacts, core.config.imessage.db_path)
     core.add_handler(web_handler)
 
     status_poller = StatusPoller(core.config.imessage.db_path, manager)
@@ -1331,21 +1346,28 @@ def create_app(core: AppCore) -> FastAPI:
             raise HTTPException(status_code=400, detail="recipients and text required")
         if len(text) > max_msg_len:
             text = text[:max_msg_len]
+        created = False
         if len(recipients) > 1:
             group = find_group_chat(core.config.imessage.db_path, recipients)
-            if not group:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No existing group chat matches these participants. Start the group from Messages.app first.",
-                )
-            chat_id, style = group
-            core.send_to_imessage(chat_id, style, text=text)
+            if group:
+                chat_id, style = group
+                core.send_to_imessage(chat_id, style, text=text)
+            else:
+                # No such group yet: have Messages create it with the first message.
+                ok, chat_id, err = await asyncio.to_thread(core.sender.create_group_and_send, recipients, text, core.config.imessage.db_path)
+                if not ok:
+                    raise HTTPException(status_code=502, detail=f"Could not start a new group chat: {err}")
+                style, created = 43, True
         else:
-            core.send_to_imessage(recipients[0], 45, text=text)
+            chat_id, style = recipients[0], 45
+            core.send_to_imessage(chat_id, style, text=text)
         # Refresh known chats so WebSocket sending works for this chat going forward
         nonlocal known_chats
         known_chats = _get_known_chat_identifiers(core.config.imessage.db_path)
-        return {"ok": True}
+        if created:
+            web_handler._group_names.pop(chat_id, None)
+        name = group_display_name(core.config.imessage.db_path, chat_id, contact_store.contacts) if style == 43 else (resolve_identifier(chat_id, contact_store.contacts) or chat_id)
+        return {"ok": True, "chat_identifier": chat_id, "chat_style": style, "display_name": name, "created": created}
 
     @app.get("/api/chats/{chat_identifier:path}/messages")
     async def api_messages(chat_identifier: str, offset: int = 0, limit: int = 100, session: str | None = Cookie(default=None, alias="session")):

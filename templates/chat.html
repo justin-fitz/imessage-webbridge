@@ -1041,7 +1041,7 @@ function connectWS() {
         }
         showLastStatus();
         if (!data.is_from_me && document.hidden) {
-          const senderName = data.sender_id || data.chat_display_name || data.chat_identifier;
+          const senderName = (data.chat_style == 43 && data.chat_display_name) ? `${data.sender_id} (${data.chat_display_name})` : (data.sender_id || data.chat_display_name || data.chat_identifier);
           showNotification(senderName, data.text);
           startFlash(`New message from ${senderName}`);
         }
@@ -1052,7 +1052,7 @@ function connectWS() {
         updateTitle();
 
         // Notifications for messages not in current view
-        const senderName = data.sender_id || data.chat_display_name || cid;
+        const senderName = (data.chat_style == 43 && data.chat_display_name) ? `${data.sender_id} (${data.chat_display_name})` : (data.sender_id || data.chat_display_name || cid);
         showNotification(senderName, data.text);
         startFlash(`New message from ${senderName}`);
       }
@@ -1379,6 +1379,7 @@ async function sendMessage() {
       body: JSON.stringify({ recipients, text }),
     });
     if (resp.ok) {
+      const res = await resp.json().catch(() => ({}));
       appendMessage({ text, is_from_me: true, sender_id: 'me', timestamp: new Date().toISOString() });
       input.value = '';
       input.style.height = 'auto';
@@ -1386,6 +1387,11 @@ async function sendMessage() {
       document.getElementById('new-msg-header').style.display = 'none';
       const chatsResp = await fetch('/api/chats');
       if (chatsResp.ok) refreshChatList(await chatsResp.json());
+      // Jump into the (possibly brand-new group) thread so follow-ups go over WS
+      if (res.chat_identifier) openChatById(res.chat_identifier, res.chat_style, res.display_name);
+    } else {
+      const j = await resp.json().catch(() => ({}));
+      alert(j.detail || `Send failed (${resp.status})`);
     }
     return;
   }
