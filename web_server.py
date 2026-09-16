@@ -52,7 +52,6 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 _SESSION_TTL = 8 * 3600        # absolute lifetime of a login
 _SESSION_IDLE = 2 * 3600       # logged out after this long without activity
-_SEND_ARM_TTL = 4 * 3600      # how long "unlock sending" lasts after re-entering the password (or a passkey login)
 _session_db: sqlite3.Connection | None = None
 _session_db_path: str | None = None
 _login_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
@@ -213,7 +212,7 @@ def _create_session(ip: str = "") -> str:
     token = secrets.token_urlsafe(32)
     now = time.time()
     _session_db.execute(
-        "INSERT INTO sessions (token, expiry, last_seen, ip, send_armed_until) VALUES (?, ?, ?, ?, 0)",
+        "INSERT INTO sessions (token, expiry, last_seen, ip) VALUES (?, ?, ?, ?)",
         (token, now + _SESSION_TTL, now, ip),
     )
     _session_db.commit()
@@ -247,22 +246,6 @@ def _touch_session(token: str | None) -> None:
     if token and _session_db:
         _session_db.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (time.time(), token))
         _session_db.commit()
-
-
-def _send_armed(token: str | None) -> float:
-    """Return the unix time until which this session may send, or 0."""
-    if not token or not _session_db:
-        return 0
-    row = _session_db.execute("SELECT send_armed_until FROM sessions WHERE token = ?", (token,)).fetchone()
-    until = (row[0] if row else 0) or 0
-    return until if until > time.time() else 0
-
-
-def _arm_send(token: str) -> float:
-    until = time.time() + _SEND_ARM_TTL
-    _session_db.execute("UPDATE sessions SET send_armed_until = ? WHERE token = ?", (until, token))
-    _session_db.commit()
-    return until
 
 
 def _logout_everywhere() -> int:
@@ -1094,57 +1077,6 @@ def create_app(core: AppCore) -> FastAPI:
         resp.delete_cookie("session")
         return resp
 
-    @app.get("/api/send/status")
-    async def send_status(session: str | None = Cookie(default=None, alias="session")):
-        if password and not _valid_session(session):
-            raise HTTPException(status_code=401)
-        until = _send_armed(session)
-        return {"armed": bool(until), "until": until}
-
-    @app.post("/api/send/arm")
-    async def send_arm(request: Request, session: str | None = Cookie(default=None, alias="session")):
-        """Sessions are read-only until the password is re-entered; then sending is
-        allowed for _SEND_ARM_TTL. Shares the login rate limiter so it can't be brute-forced."""
-        if password and not _valid_session(session):
-            raise HTTPException(status_code=401)
-        if not password:
-            return {"armed": True, "until": time.time() + _SEND_ARM_TTL}
-        client_ip = request.client.host if request.client else "unknown"
-        now = time.time()
-        attempts = [t for t in _login_attempts.get(client_ip, []) if now - t < login_rate_window]
-        if len(attempts) >= login_rate_limit:
-            raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
-        body = await request.json()
-        if not secrets.compare_digest(str(body.get("password", "")).encode(), password.encode()):
-            attempts.append(now)
-            _login_attempts[client_ip] = attempts
-            raise HTTPException(status_code=401, detail="Invalid password")
-        _login_attempts.pop(client_ip, None)
-        until = _arm_send(session)
-        _notify("iMessage bridge: sending unlocked", f"From {client_ip} — {_geo(client_ip)} for {_SEND_ARM_TTL // 60} min")
-        return {"armed": True, "until": until}
-
-    @app.post("/api/send/arm/passkey/options")
-    async def send_arm_passkey_options(request: Request, session: str | None = Cookie(default=None, alias="session")):
-        if password and not _valid_session(session):
-            raise HTTPException(status_code=401)
-        if not _passkeys():
-            raise HTTPException(status_code=404, detail="no passkeys enrolled")
-        rp_id, _ = _rp(request)
-        opts = generate_authentication_options(rp_id=rp_id, user_verification=UserVerificationRequirement.REQUIRED)
-        return {"challenge_id": _new_challenge(opts.challenge, "arm"), "options": json.loads(options_to_json(opts))}
-
-    @app.post("/api/send/arm/passkey/verify")
-    async def send_arm_passkey_verify(request: Request, session: str | None = Cookie(default=None, alias="session")):
-        """Unlock sending with Touch ID / Face ID instead of the password."""
-        if password and not _valid_session(session):
-            raise HTTPException(status_code=401)
-        key = await _verify_passkey(request, "arm")
-        until = _arm_send(session)
-        client_ip = request.client.host if request.client else "unknown"
-        _notify("iMessage bridge: sending unlocked", f"'{key['name']}' passkey from {client_ip} — {_geo(client_ip)}")
-        return {"armed": True, "until": until}
-
     @app.get("/api/passkeys/available")
     async def passkeys_available(session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
@@ -1156,8 +1088,6 @@ def create_app(core: AppCore) -> FastAPI:
     async def passkey_register_options(request: Request, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
-        if password and not _send_armed(session):
-            raise HTTPException(status_code=403, detail="send_locked")   # re-enter password before adding a key
         rp_id, _ = _rp(request)
         opts = generate_registration_options(
             rp_id=rp_id, rp_name="iMessage Bridge",
@@ -1210,8 +1140,6 @@ def create_app(core: AppCore) -> FastAPI:
     async def passkey_delete(credential_id: str, request: Request, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
-        if password and not _send_armed(session):
-            raise HTTPException(status_code=403, detail="send_locked")
         row = _session_db.execute("SELECT name FROM passkeys WHERE credential_id = ?", (credential_id,)).fetchone()
         _session_db.execute("DELETE FROM passkeys WHERE credential_id = ?", (credential_id,))
         _session_db.commit()
@@ -1263,7 +1191,6 @@ def create_app(core: AppCore) -> FastAPI:
         client_ip = request.client.host if request.client else "unknown"
         key = await _verify_passkey(request, "login")
         token = _create_session(client_ip)
-        _arm_send(token)        # biometric + phishing-resistant → sending unlocked without a second prompt
         _notify("iMessage bridge: passkey login", f"'{key['name']}' from {client_ip} — {_geo(client_ip)}")
         resp = Response(content='{"ok": true}', media_type="application/json")
         resp.set_cookie("session", token, httponly=True, samesite="strict", secure=(request.url.scheme == "https"), max_age=_SESSION_TTL)
@@ -1335,8 +1262,6 @@ def create_app(core: AppCore) -> FastAPI:
     async def send_new_message(request: Request, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
-        if password and not _send_armed(session):
-            raise HTTPException(status_code=403, detail="send_locked")
         if not _check_send_rate(session or ""):
             raise HTTPException(status_code=429, detail="Send rate limit exceeded; slow down.")
         body = await request.json()
@@ -1431,8 +1356,6 @@ def create_app(core: AppCore) -> FastAPI:
     async def upload_file(file: UploadFile, session: str | None = Cookie(default=None, alias="session")):
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
-        if password and not _send_armed(session):
-            raise HTTPException(status_code=403, detail="send_locked")
         if file.content_type and file.content_type not in _UPLOAD_ALLOWED_TYPES:
             raise HTTPException(status_code=400, detail=f"File type not allowed: {file.content_type}")
         data = await file.read(_UPLOAD_MAX + 1)
@@ -1497,10 +1420,6 @@ def create_app(core: AppCore) -> FastAPI:
                     file_path = msg.get("file_path", "")
 
                     if chat_id not in known_chats:
-                        continue
-                    if password and not _send_armed(session_token):
-                        await ws.send_text(json.dumps({"type": "error", "code": "send_locked",
-                                                       "message": "Sending is locked — unlock with your password"}))
                         continue
                     if not _check_send_rate(session_token):
                         await ws.send_text(json.dumps({"type": "error", "message": "Send rate limit exceeded"}))
