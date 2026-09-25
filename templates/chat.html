@@ -159,6 +159,10 @@
 
   .msg-body {
     display: inline;
+    /* Keep line breaks and runs of spaces from the message text; normal
+       HTML whitespace collapsing flattens multi-line messages into one
+       paragraph. */
+    white-space: pre-wrap;
   }
 
   .msg-row {
