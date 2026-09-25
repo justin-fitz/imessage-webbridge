@@ -880,7 +880,7 @@ LOGIN_HTML = """<!DOCTYPE html>
 <style>
   body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #e0e0e0;
          display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-  form { background: #222; padding: 32px; border-radius: 12px; width: 300px; text-align: center; }
+  .card { background: #222; padding: 32px; border-radius: 12px; width: 300px; text-align: center; }
   .login-logo { width: 64px; height: 64px; border-radius: 14px; margin-bottom: 16px; }
   h2 { margin: 0 0 20px; font-size: 18px; }
   input { width: 100%; padding: 10px 14px; border: 1px solid #444; border-radius: 8px;
@@ -890,18 +890,27 @@ LOGIN_HTML = """<!DOCTYPE html>
            border: none; border-radius: 8px; font-size: 14px; cursor: pointer; }
   button:hover { background: #0a75e0; }
   .error { color: #ff3b30; font-size: 12px; margin-top: 8px; }
+  .alt-link { display: inline-block; margin-top: 16px; color: #8e8e93; font-size: 12px; text-decoration: none; }
+  .alt-link:hover { color: #e0e0e0; text-decoration: underline; }
 </style>
 </head><body>
 <script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');</script>
-<form method="POST" action="/login">
+<noscript><style>#pw-form { display: block !important; } #pk-view { display: none !important; }</style></noscript>
+<div class="card">
   <img src="/static/logo2.svg" alt="" class="login-logo">
   <h2>iMessage Web Gateway</h2>
-  <input type="password" name="password" placeholder="Password" autofocus>
-  <button type="submit">Login</button>
-  <button type="button" id="pk-btn" style="background:#2c2c2e;margin-top:8px">&#128273; Sign in with passkey</button>
-  <div class="error" id="pk-err"></div>
-  {error}
-</form>
+  <div id="pk-view"{pk_hidden}>
+    <button type="button" id="pk-btn">&#128273; Sign in with passkey</button>
+    <div class="error" id="pk-err"></div>
+    <a href="#" class="alt-link" id="pw-link">Use password instead</a>
+  </div>
+  <form id="pw-form" method="POST" action="/login"{pw_hidden}>
+    <input type="password" name="password" id="pw-input" placeholder="Password" autocomplete="current-password">
+    <button type="submit">Login</button>
+    {error}
+    <a href="#" class="alt-link" id="pk-link">Use a passkey instead</a>
+  </form>
+</div>
 <script>
 const b64u = {
   dec: s => Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0)),
@@ -928,10 +937,36 @@ async function passkeyLogin() {
     err.textContent = v.status === 429 ? 'Too many attempts. Try again later.' : 'Passkey not recognised';
   } catch (e) { if (e.name !== 'NotAllowedError') err.textContent = 'Passkey sign-in failed'; }
 }
+// Passkey is the default view; the password form stays hidden behind a link.
+// The server opens on the password form instead when no passkey is enrolled
+// or a password attempt just failed.
+function showPassword(show) {
+  document.getElementById('pk-view').hidden = show;
+  document.getElementById('pw-form').hidden = !show;
+  if (show) document.getElementById('pw-input').focus();
+}
 document.getElementById('pk-btn').addEventListener('click', passkeyLogin);
-if (!window.PublicKeyCredential) document.getElementById('pk-btn').style.display = 'none';
+document.getElementById('pw-link').addEventListener('click', e => { e.preventDefault(); showPassword(true); });
+document.getElementById('pk-link').addEventListener('click', e => { e.preventDefault(); showPassword(false); });
+if (!window.PublicKeyCredential || {no_passkeys}) {
+  document.getElementById('pk-link').hidden = true;
+  showPassword(true);
+}
 </script>
 </body></html>"""
+
+
+def _login_html(error: str = "", password_first: bool = False) -> str:
+    """Render the login page. Passkey sign-in is the default view; the password
+    form opens first only when no passkey is enrolled or `password_first` is set
+    (a password attempt just failed, so keep the user where they were)."""
+    no_passkeys = not _passkeys()
+    pw_first = password_first or no_passkeys
+    return (LOGIN_HTML
+            .replace("{pk_hidden}", " hidden" if pw_first else "")
+            .replace("{pw_hidden}", "" if pw_first else " hidden")
+            .replace("{no_passkeys}", "true" if no_passkeys else "false")
+            .replace("{error}", error))
 
 
 class ContactStore:
@@ -1023,7 +1058,7 @@ def create_app(core: AppCore) -> FastAPI:
     async def login_page():
         if not password:
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(LOGIN_HTML.replace("{error}", ""))
+        return HTMLResponse(_login_html())
 
     @app.post("/login")
     async def login_submit(request: Request, response: Response, password_input: str = Form(alias="password")):
@@ -1039,7 +1074,7 @@ def create_app(core: AppCore) -> FastAPI:
                 _login_attempts[client_ip] = attempts
                 _notify_login(client_ip, ok=False, detail=f"{login_rate_limit} wrong passwords")
             return HTMLResponse(
-                LOGIN_HTML.replace("{error}", '<div class="error">Too many attempts. Try again later.</div>'),
+                _login_html('<div class="error">Too many attempts. Try again later.</div>', password_first=True),
                 status_code=429,
             )
 
@@ -1054,7 +1089,7 @@ def create_app(core: AppCore) -> FastAPI:
 
         attempts.append(now)
         _login_attempts[client_ip] = attempts
-        return HTMLResponse(LOGIN_HTML.replace("{error}", '<div class="error">Invalid password</div>'), status_code=401)
+        return HTMLResponse(_login_html('<div class="error">Invalid password</div>', password_first=True), status_code=401)
 
     @app.get("/logout")
     async def logout(session: str | None = Cookie(default=None, alias="session")):

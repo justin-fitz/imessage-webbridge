@@ -543,6 +543,32 @@ class TestAppEndpoints:
         assert resp.status_code == 200
         assert "iMessage Web Gateway" in resp.text
 
+    def test_login_page_defaults_to_passkey_when_enrolled(self, tmp_path):
+        import web_server
+        client, _ = self._make_client(tmp_path)
+        web_server._session_db.execute(
+            "INSERT INTO passkeys (credential_id, public_key, name, created_at) VALUES ('c1', x'00', 'Phone', 0)")
+        web_server._session_db.commit()
+        resp = client.get("/login")
+        assert '<div id="pk-view">' in resp.text
+        assert '<form id="pw-form" method="POST" action="/login" hidden>' in resp.text
+        assert "Use password instead" in resp.text
+
+    def test_login_page_shows_password_without_passkeys(self, tmp_path):
+        client, _ = self._make_client(tmp_path)
+        resp = client.get("/login")
+        assert '<div id="pk-view" hidden>' in resp.text
+        assert '<form id="pw-form" method="POST" action="/login">' in resp.text
+
+    def test_login_failure_reopens_password_form(self, tmp_path):
+        import web_server
+        client, _ = self._make_client(tmp_path)
+        web_server._session_db.execute(
+            "INSERT INTO passkeys (credential_id, public_key, name, created_at) VALUES ('c1', x'00', 'Phone', 0)")
+        web_server._session_db.commit()
+        resp = client.post("/login", data={"password": "wrong"})
+        assert '<form id="pw-form" method="POST" action="/login">' in resp.text
+
     def test_login_success(self, tmp_path):
         client, _ = self._make_client(tmp_path)
         resp = client.post("/login", data={"password": "testpass"}, follow_redirects=False)
