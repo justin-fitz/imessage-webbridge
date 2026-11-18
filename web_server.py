@@ -366,6 +366,9 @@ class StatusPoller:
             dd = row["date_delivered"]
             if row["error"]:
                 s = "failed"
+                if self._seeded and self._status_cache.get(rid) not in (None, "failed"):
+                    print(f"[IMSG-SEND] message {rid} to {row['chat_identifier']!r} failed: "
+                          f"Messages error {row['error']}", flush=True)
             elif dr and dr != 0:
                 s = "read"
             elif dd and dd != 0:
@@ -1456,8 +1459,12 @@ def create_app(core: AppCore) -> FastAPI:
             except Exception:
                 pass
 
-        async def _confirm_send(ws, client_id: str, chat_id: str, before: int, timeout: float = 15.0):
+        async def _confirm_send(ws, client_id: str, chat_id: str, before: int, timeout: float = 60.0):
+            # Wait for Messages' final word on the row, not just its existence:
+            # it writes the row as pending and only sets `error` when the send
+            # fails, which for SMS can take ~20s.
             deadline = time.time() + timeout
+            found = None
             while time.time() < deadline:
                 await _asyncio.sleep(1.0)
                 try:
@@ -1465,13 +1472,22 @@ def create_app(core: AppCore) -> FastAPI:
                 except Exception as e:
                     print(f"[IMSG-SEND] confirm query failed: {e}", flush=True)
                     return
-                if found:
-                    _rowid, code = found
-                    if code:
-                        await _send_result(ws, client_id, chat_id, False, f"Messages reported error {code}")
-                    else:
-                        await _send_result(ws, client_id, chat_id, True)
+                if not found:
+                    continue
+                rowid, code, settled = found
+                if code:
+                    await _send_result(ws, client_id, chat_id, False,
+                                       f"Messages reported error {code} (message {rowid})")
                     return
+                if settled:
+                    await _send_result(ws, client_id, chat_id, True)
+                    return
+            if found:
+                # Still pending; don't call it failed. The status poller will
+                # flip the bubble to Not Delivered if Messages errors later.
+                print(f"[IMSG-SEND] message {found[0]} to {chat_id!r} still pending after {timeout:.0f}s", flush=True)
+                await _send_result(ws, client_id, chat_id, True)
+                return
             await _send_result(ws, client_id, chat_id, False,
                                "Messages accepted the send but never recorded it. Check that Messages on the "
                                "Mac is signed in and, for SMS, that Text Message Forwarding to this Mac is on.")

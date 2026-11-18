@@ -112,15 +112,22 @@ class AppCore:
             print(f"latest_message_rowid failed: {e}", flush=True)
             return 0
 
-    def find_sent_row(self, chat_identifier: str, after_rowid: int) -> tuple[int, int] | None:
+    def find_sent_row(self, chat_identifier: str, after_rowid: int) -> tuple[int, int, bool] | None:
         """Our outgoing message in this chat newer than `after_rowid`, as
-        (rowid, error). None until Messages has written it to chat.db. A
-        non-zero `error` is Messages' own "Not Delivered"."""
+        (rowid, error, settled). None until Messages has written it to chat.db.
+        A non-zero `error` is Messages' own "Not Delivered". Messages writes the
+        row before it transmits (error=0, is_sent=0) and only sets the error
+        once the send fails, which for SMS can be ~20s later; `settled` is True
+        once the row is sent or delivered, so a pending row isn't taken as a
+        success."""
         import sqlite3
         conn = sqlite3.connect(f"file:{self.config.imessage.db_path}?mode=ro", uri=True)
         try:
             row = conn.execute(
-                """SELECT m.ROWID, COALESCE(m.error, 0) FROM message m
+                """SELECT m.ROWID, COALESCE(m.error, 0),
+                          COALESCE(m.is_sent, 0) OR COALESCE(m.is_delivered, 0)
+                          OR COALESCE(m.date_delivered, 0) != 0
+                   FROM message m
                    JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
                    JOIN chat c ON cmj.chat_id = c.ROWID
                    WHERE c.chat_identifier = ? AND m.is_from_me = 1 AND m.ROWID > ?
@@ -128,7 +135,7 @@ class AppCore:
                    ORDER BY m.ROWID DESC LIMIT 1""",
                 (chat_identifier, after_rowid),
             ).fetchone()
-            return (row[0], row[1]) if row else None
+            return (row[0], row[1], bool(row[2])) if row else None
         finally:
             conn.close()
 

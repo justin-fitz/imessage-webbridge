@@ -34,7 +34,8 @@ def _create_test_chatdb(path):
             item_type INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
             associated_message_guid TEXT, service TEXT, was_delivered_quietly INTEGER DEFAULT 0,
             attributedBody BLOB, date_delivered INTEGER DEFAULT 0, date_read INTEGER DEFAULT 0,
-            thread_originator_guid TEXT, is_read INTEGER DEFAULT 0, error INTEGER DEFAULT 0
+            thread_originator_guid TEXT, is_read INTEGER DEFAULT 0, error INTEGER DEFAULT 0,
+            is_sent INTEGER DEFAULT 0, is_delivered INTEGER DEFAULT 0
         );
         CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
         CREATE TABLE attachment (
@@ -498,7 +499,18 @@ class TestAppCoreSend:
         conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 4)")
         conn.commit()
         conn.close()
-        assert core.find_sent_row("+15551234567", before) == (4, 22)
+        assert core.find_sent_row("+15551234567", before) == (4, 22, False)
+        # A pending row (no error yet, not sent) isn't settled...
+        conn = sqlite3.connect(config.imessage.db_path)
+        conn.execute("INSERT INTO message (ROWID, text, is_from_me) VALUES (5, 'y', 1)")
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 5)")
+        conn.commit()
+        assert core.find_sent_row("+15551234567", 4) == (5, 0, False)
+        # ...until Messages marks it sent.
+        conn.execute("UPDATE message SET is_sent=1 WHERE ROWID=5")
+        conn.commit()
+        conn.close()
+        assert core.find_sent_row("+15551234567", 4) == (5, 0, True)
 
     def test_send_file(self, tmp_path):
         config = _make_config(tmp_path)
