@@ -26,7 +26,7 @@ def _create_test_chatdb(path):
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
-        CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT, style INTEGER, service_name TEXT);
+        CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, display_name TEXT, style INTEGER, service_name TEXT);
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
         CREATE TABLE message (
             ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, is_from_me INTEGER DEFAULT 0,
@@ -34,7 +34,7 @@ def _create_test_chatdb(path):
             item_type INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
             associated_message_guid TEXT, service TEXT, was_delivered_quietly INTEGER DEFAULT 0,
             attributedBody BLOB, date_delivered INTEGER DEFAULT 0, date_read INTEGER DEFAULT 0,
-            thread_originator_guid TEXT, is_read INTEGER DEFAULT 0
+            thread_originator_guid TEXT, is_read INTEGER DEFAULT 0, error INTEGER DEFAULT 0
         );
         CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
         CREATE TABLE attachment (
@@ -470,7 +470,35 @@ class TestAppCoreSend:
             core = AppCore(config)
         core.sender = MagicMock()
         core.send_to_imessage("+15551234567", 45, text="hello")
-        core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello", service=None)
+        core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello", service=None, chat_guid=None)
+
+    def test_send_text_reports_failure(self, tmp_path):
+        config = _make_config(tmp_path)
+        with patch("app_core.IMessageReader"):
+            core = AppCore(config)
+        core.sender = MagicMock()
+        core.sender.send_text.return_value = False
+        core.sender.last_error = "Messages got an error"
+        assert core.send_to_imessage("+15551234567", 45, text="hello") == (False, "Messages got an error")
+
+    def test_chat_route_and_sent_row(self, tmp_path):
+        config = _make_config(tmp_path)
+        _create_test_chatdb(config.imessage.db_path)
+        conn = sqlite3.connect(config.imessage.db_path)
+        conn.execute("UPDATE chat SET service_name='SMS', guid='SMS;-;+15551234567' WHERE ROWID=1")
+        conn.commit()
+        with patch("app_core.IMessageReader"):
+            core = AppCore(config)
+        assert core._chat_route("+15551234567", 45) == ("SMS", "SMS;-;+15551234567")
+        assert core._chat_route("chat123", 43) == (None, None)
+        before = core.latest_message_rowid()
+        assert before == 3
+        assert core.find_sent_row("+15551234567", before) is None
+        conn.execute("INSERT INTO message (ROWID, text, is_from_me, error) VALUES (4, 'x', 1, 22)")
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 4)")
+        conn.commit()
+        conn.close()
+        assert core.find_sent_row("+15551234567", before) == (4, 22)
 
     def test_send_file(self, tmp_path):
         config = _make_config(tmp_path)
@@ -1028,7 +1056,27 @@ class TestWebSocketEndpoint:
                 "chat_style": 45,
                 "text": "hello from ws",
             }))
-        core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello from ws", service=None)
+        core.sender.send_text.assert_called_once_with("+15551234567", 45, "hello from ws", service=None, chat_guid=None)
+
+    def test_ws_send_failure_reported_to_client(self, tmp_path):
+        """A send Messages rejects comes back as a failed send_result, not silence."""
+        client, core = self._make_client(tmp_path)
+        token = self._get_session(client)
+        client.cookies.set("session", token)
+        core.sender = MagicMock()
+        core.sender.send_text.return_value = False
+        core.sender.last_error = "Messages got an error"
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({
+                "type": "send", "chat_identifier": "+15551234567", "chat_style": 45,
+                "text": "hello", "client_id": "c123",
+            }))
+            while True:
+                data = json.loads(ws.receive_text())
+                if data.get("type") == "send_result":
+                    break
+        assert data == {"type": "send_result", "client_id": "c123", "chat_identifier": "+15551234567",
+                        "ok": False, "error": "Messages got an error"}
 
     def test_ws_unknown_chat_ignored(self, tmp_path):
         """Message to unknown chat is ignored."""
@@ -1139,3 +1187,16 @@ class TestNoPasswordMode:
         client = TestClient(app)
         resp = client.get("/api/chats")
         assert resp.status_code == 200
+
+
+def test_history_marks_errored_message_failed(tmp_path):
+    from web_server import get_chat_messages
+    db = _create_test_chatdb(str(tmp_path / "chat.db"))
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE message SET error = 22 WHERE ROWID = 3")  # ROWID 3 is from me
+    conn.commit()
+    conn.close()
+    msgs = get_chat_messages(db, "+15551234567", {})
+    by_id = {m["rowid"]: m for m in msgs}
+    assert by_id[3]["status"] == "failed"
+    assert by_id[1]["status"] == "sent"

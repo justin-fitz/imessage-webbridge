@@ -157,3 +157,49 @@ def test_applescript_called_with_timeout(mock_run):
     sender = IMessageSender()
     sender.send_text("+15551234567", 45, "test")
     assert mock_run.call_args[1]["timeout"] == 10
+
+
+@patch("imessage_sender.subprocess.run")
+def test_send_text_failure_records_error(mock_run):
+    mock_run.return_value = MagicMock(returncode=1, stderr="execution error: Messages got an error (-1700)", stdout="")
+    sender = IMessageSender()
+    assert sender.send_text("+15551234567", 45, "hi", service="SMS") is False
+    assert "-1700" in sender.last_error
+
+
+@patch("imessage_sender.subprocess.run")
+def test_send_text_falls_back_to_chat_guid(mock_run):
+    """If addressing the participant fails, retry via the existing thread's chat id."""
+    mock_run.side_effect = [MagicMock(returncode=1, stderr="bad service", stdout=""),
+                            MagicMock(returncode=0, stderr="", stdout="")]
+    sender = IMessageSender()
+    assert sender.send_text("+15551234567", 45, "hi", service="RCS", chat_guid="RCS;-;+15551234567") is True
+    script = mock_run.call_args_list[1][0][0][2]
+    assert 'chat id "RCS;-;+15551234567"' in script
+    assert mock_run.call_args_list[1][1]["env"]["IMSG_TEXT"] == "hi"
+
+
+@patch("imessage_sender.subprocess.run")
+def test_send_text_fallback_failure_reports_both(mock_run):
+    mock_run.side_effect = [MagicMock(returncode=1, stderr="first", stdout=""),
+                            MagicMock(returncode=1, stderr="second", stdout="")]
+    sender = IMessageSender()
+    assert sender.send_text("+15551234567", 45, "hi", chat_guid="SMS;-;+15551234567") is False
+    assert "first" in sender.last_error and "second" in sender.last_error
+
+
+@patch("imessage_sender.subprocess.run")
+def test_send_text_rejects_malformed_chat_guid(mock_run):
+    mock_run.return_value = MagicMock(returncode=1, stderr="nope", stdout="")
+    sender = IMessageSender()
+    assert sender.send_text("+15551234567", 45, "hi", chat_guid='x" & do shell script "evil') is False
+    assert mock_run.call_count == 1  # no fallback attempted
+
+
+@patch("imessage_sender.subprocess.run")
+def test_send_text_timeout_is_a_failure(mock_run):
+    import subprocess
+    mock_run.side_effect = subprocess.TimeoutExpired("osascript", 10)
+    sender = IMessageSender()
+    assert sender.send_text("+15551234567", 45, "hi") is False
+    assert "did not respond" in sender.last_error

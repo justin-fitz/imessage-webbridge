@@ -348,7 +348,7 @@ class StatusPoller:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
             SELECT m.ROWID, m.date_delivered, m.date_read, m.was_delivered_quietly,
-                   c.chat_identifier
+                   COALESCE(m.error, 0) AS error, c.chat_identifier
             FROM message m
             JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
             JOIN chat c ON cmj.chat_id = c.ROWID
@@ -364,7 +364,9 @@ class StatusPoller:
             rid = row["ROWID"]
             dr = row["date_read"]
             dd = row["date_delivered"]
-            if dr and dr != 0:
+            if row["error"]:
+                s = "failed"
+            elif dr and dr != 0:
                 s = "read"
             elif dd and dd != 0:
                 s = "delivered"
@@ -785,7 +787,7 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
     rows = conn.execute("""
         SELECT m.ROWID, m.guid, m.text, m.is_from_me, m.date, m.attributedBody,
                m.cache_has_attachments, m.service, m.was_delivered_quietly,
-               m.date_delivered, m.date_read, h.id as sender_id,
+               m.date_delivered, m.date_read, COALESCE(m.error, 0) AS error, h.id as sender_id,
                m.thread_originator_guid,
                orig.text as reply_to_text, orig.attributedBody as reply_to_body,
                orig.is_from_me as reply_to_from_me, h2.id as reply_to_sender
@@ -830,7 +832,9 @@ def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, st
         if row["is_from_me"]:
             dr = row["date_read"]
             dd = row["date_delivered"]
-            if dr and dr != 0:
+            if row["error"]:
+                status = "failed"
+            elif dr and dr != 0:
                 status = "read"
             elif dd and dd != 0:
                 status = "delivered"
@@ -1311,7 +1315,9 @@ def create_app(core: AppCore) -> FastAPI:
             group = find_group_chat(core.config.imessage.db_path, recipients)
             if group:
                 chat_id, style = group
-                core.send_to_imessage(chat_id, style, text=text)
+                ok, err = await asyncio.to_thread(core.send_to_imessage, chat_id, style, text=text)
+                if not ok:
+                    raise HTTPException(status_code=502, detail=f"Messages could not send: {err}")
             else:
                 # No such group yet: have Messages create it with the first message.
                 ok, chat_id, err = await asyncio.to_thread(core.sender.create_group_and_send, recipients, text, core.config.imessage.db_path)
@@ -1320,7 +1326,9 @@ def create_app(core: AppCore) -> FastAPI:
                 style, created = 43, True
         else:
             chat_id, style = recipients[0], 45
-            core.send_to_imessage(chat_id, style, text=text)
+            ok, err = await asyncio.to_thread(core.send_to_imessage, chat_id, style, text=text)
+            if not ok:
+                raise HTTPException(status_code=502, detail=f"Messages could not send: {err}")
         # Refresh known chats so WebSocket sending works for this chat going forward
         nonlocal known_chats
         known_chats = _get_known_chat_identifiers(core.config.imessage.db_path)
@@ -1438,6 +1446,36 @@ def create_app(core: AppCore) -> FastAPI:
                     break
 
         import asyncio as _asyncio
+
+        async def _send_result(ws, client_id: str, chat_id: str, ok: bool, error: str = ""):
+            if not ok:
+                print(f"[IMSG-SEND] send to {chat_id!r} failed: {error}", flush=True)
+            try:
+                await ws.send_text(json.dumps({"type": "send_result", "client_id": client_id,
+                                               "chat_identifier": chat_id, "ok": ok, "error": error}))
+            except Exception:
+                pass
+
+        async def _confirm_send(ws, client_id: str, chat_id: str, before: int, timeout: float = 15.0):
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                await _asyncio.sleep(1.0)
+                try:
+                    found = await _asyncio.to_thread(core.find_sent_row, chat_id, before)
+                except Exception as e:
+                    print(f"[IMSG-SEND] confirm query failed: {e}", flush=True)
+                    return
+                if found:
+                    _rowid, code = found
+                    if code:
+                        await _send_result(ws, client_id, chat_id, False, f"Messages reported error {code}")
+                    else:
+                        await _send_result(ws, client_id, chat_id, True)
+                    return
+            await _send_result(ws, client_id, chat_id, False,
+                               "Messages accepted the send but never recorded it. Check that Messages on the "
+                               "Mac is signed in and, for SMS, that Text Message Forwarding to this Mac is on.")
+
         ping_task = _asyncio.create_task(_ping_loop())
         try:
             while True:
@@ -1458,6 +1496,7 @@ def create_app(core: AppCore) -> FastAPI:
                         continue
                     if not _check_send_rate(session_token):
                         await ws.send_text(json.dumps({"type": "error", "message": "Send rate limit exceeded"}))
+                        await _send_result(ws, str(msg.get("client_id", ""))[:64], chat_id, False, "Send rate limit exceeded")
                         continue
                     # Validate file_path is inside the temp dir (prevent path traversal)
                     if file_path:
@@ -1467,10 +1506,23 @@ def create_app(core: AppCore) -> FastAPI:
                             file_path = ""
                     if len(text) > max_msg_len:
                         text = text[:max_msg_len]
+                    client_id = str(msg.get("client_id", ""))[:64]
+                    before = core.latest_message_rowid()
+                    # osascript can take seconds; keep it off the event loop.
                     if file_path:
-                        core.send_to_imessage(chat_id, chat_style, file_path=file_path)
+                        f_ok, f_err = await _asyncio.to_thread(core.send_to_imessage, chat_id, chat_style, file_path=file_path)
+                    else:
+                        f_ok, f_err = True, ""
                     if text:
-                        core.send_to_imessage(chat_id, chat_style, text=text)
+                        ok, err = await _asyncio.to_thread(core.send_to_imessage, chat_id, chat_style, text=text)
+                    else:
+                        ok, err = True, ""
+                    if not (f_ok and ok):
+                        await _send_result(ws, client_id, chat_id, False, "; ".join(e for e in (f_err, err) if e))
+                    elif text:
+                        # Messages accepting the AppleScript isn't proof it sent:
+                        # confirm the row lands in chat.db without an error.
+                        _asyncio.create_task(_confirm_send(ws, client_id, chat_id, before))
         except WebSocketDisconnect:
             manager.disconnect(ws)
         except Exception:

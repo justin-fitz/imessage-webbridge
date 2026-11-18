@@ -255,6 +255,11 @@
 
   .msg.from-me .msg-status { color: rgba(255,255,255,0.5); }
 
+  /* A send the bridge or Messages reported as failed */
+  .msg.from-me.send-failed { opacity: 0.75; box-shadow: inset 0 0 0 2px #ff453a; }
+  .msg.from-me .msg-status.failed { color: #fff; font-weight: 600; }
+  .msg-fail-reason { font-size: 11px; margin-top: 2px; color: rgba(255,255,255,0.85); white-space: normal; }
+
   .msg:has(.msg-img) { max-width: 50%; }
 
   .msg-img {
@@ -967,6 +972,8 @@ function connectWS() {
         }
         updateFocusBanner();
       }
+    } else if (data.type === 'send_result') {
+      settleSend(data.client_id, data.ok, data.error);
     } else if (data.type === 'read_sync') {
       // iPhone/Messages.app marked this chat read — clear our in-memory badge.
       // Server already cleared the webapp_read_horizon row in _check_read_sync.
@@ -1316,20 +1323,25 @@ async function sendMessage() {
 
   if (!text && !filePath) return;
 
+  const clientId = `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   const payload = {
     type: 'send',
     chat_identifier: state.chatId,
     chat_style: state.chatStyle,
+    client_id: clientId,
   };
   if (text) payload.text = text;
   if (filePath) payload.file_path = filePath;
-  state.ws.send(JSON.stringify(payload));
+  // A closed socket drops send() silently, so check rather than trust it.
+  const wsOpen = state.ws && state.ws.readyState === WebSocket.OPEN;
+  if (wsOpen) state.ws.send(JSON.stringify(payload));
 
   const msgData = {
     is_from_me: true,
     sender_id: 'me',
     service: state.service,
     timestamp: new Date().toISOString(),
+    client_id: clientId,
   };
   if (text) msgData.text = text;
   if (pendingFile && pendingFile.type.startsWith('image/')) {
@@ -1337,6 +1349,13 @@ async function sendMessage() {
   }
   appendMessage(msgData);
   updateSidebarPreview({ chat_identifier: state.chatId, text: text || '(image)' });
+  if (!wsOpen) {
+    settleSend(clientId, false, 'Not connected to the bridge. Reconnecting; send it again in a moment.');
+    forceReconnect();
+  } else {
+    pendingSends.set(clientId, setTimeout(() => settleSend(clientId, false,
+      'No confirmation from the bridge. It may not have sent.'), 30000));
+  }
 
   input.value = '';
   input.style.height = 'auto';
@@ -1485,6 +1504,8 @@ function createMessageElement(msg, showAvatar) {
   const msgDiv = document.createElement('div');
   msgDiv.className = `msg ${msg.is_from_me ? 'from-me' : 'from-them'}${msg.is_from_me && isSms ? ' sms' : ''}`;
   if (fromThem && isGroup) msgDiv.dataset.sender = msg.sender_id || '';
+  if (msg.client_id) msgDiv.dataset.clientId = msg.client_id;
+  if (msg.is_from_me && msg.status === 'failed') msgDiv.classList.add('send-failed');
   if (msg.is_from_me) {
     // Retained for the "notifications silenced" banner (see updateFocusBanner).
     msgDiv.dataset.status = msg.status || '';
@@ -1538,10 +1559,9 @@ function createMessageElement(msg, showAvatar) {
   }
 
   if (msg.is_from_me && msg.status) {
-    const labels = { read: 'Read', delivered: 'Delivered', sent: 'Sent' };
-    const label = labels[msg.status] || '';
+    const label = STATUS_LABELS[msg.status] || '';
     if (label) {
-      html += `<div class="msg-status" style="display:none">${label}</div>`;
+      html += `<div class="msg-status${msg.status === 'failed' ? ' failed' : ''}" style="display:none">${label}</div>`;
     }
   }
 
@@ -1618,22 +1638,56 @@ function updateFocusBanner() {
   }
 }
 
+const STATUS_LABELS = { read: 'Read', delivered: 'Delivered', sent: 'Sent', failed: '⚠️ Not Delivered' };
+const pendingSends = new Map();  // client_id -> confirmation timeout
+
+// The bridge's verdict on one send: drop the timeout and, on failure, mark
+// that bubble "Not Delivered" with the reason.
+function settleSend(clientId, ok, error) {
+  if (!clientId) return;
+  clearTimeout(pendingSends.get(clientId));
+  pendingSends.delete(clientId);
+  if (ok) return;
+  const bubble = document.querySelector(`#messages .msg[data-client-id="${CSS.escape(clientId)}"]`);
+  if (!bubble) return;
+  bubble.dataset.status = 'failed';
+  bubble.classList.add('send-failed');
+  let el = bubble.querySelector('.msg-status');
+  if (!el) {
+    el = document.createElement('div');
+    bubble.appendChild(el);
+  }
+  el.className = 'msg-status failed';
+  el.textContent = STATUS_LABELS.failed;
+  el.title = error || '';
+  if (error) {
+    let why = bubble.querySelector('.msg-fail-reason');
+    if (!why) {
+      why = document.createElement('div');
+      why.className = 'msg-fail-reason';
+      bubble.appendChild(why);
+    }
+    why.textContent = error;
+  }
+  showLastStatus();
+}
+
 function updateLastSentStatus(status) {
-  const labels = { read: 'Read', delivered: 'Delivered', sent: 'Sent' };
-  const label = labels[status] || '';
+  const label = STATUS_LABELS[status] || '';
   const sentMsgs = document.querySelectorAll('#messages .msg.from-me');
   if (sentMsgs.length === 0) return;
   const last = sentMsgs[sentMsgs.length - 1];
   last.dataset.status = status;
+  if (last.classList.contains('send-failed')) return;  // keep the failure visible
   let el = last.querySelector('.msg-status');
   if (el) {
     el.textContent = label;
   } else if (label) {
     el = document.createElement('div');
-    el.className = 'msg-status';
-    el.textContent = label;
     last.appendChild(el);
+    el.textContent = label;
   }
+  if (el) el.className = `msg-status${status === 'failed' ? ' failed' : ''}`;
   showLastStatus();
 }
 
@@ -1646,6 +1700,8 @@ function showLastStatus() {
     const status = last.querySelector('.msg-status');
     if (status) status.style.display = 'block';
   }
+  // Failures stay visible on every bubble, not just the last one.
+  document.querySelectorAll('#messages .msg-status.failed').forEach(el => el.style.display = 'block');
 }
 
 function escapeHtml(text) {

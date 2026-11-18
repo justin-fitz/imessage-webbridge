@@ -33,6 +33,8 @@ def _deferred_unlink(path: str, delay: float = _STAGED_CLEANUP_DELAY) -> None:
 # Only allow phone numbers, emails, and iMessage group chat IDs
 _BUDDY_PATTERN = re.compile(r"^[+\d\w@.\-]+$")
 _GROUP_PATTERN = re.compile(r"^(chat)?[a-f0-9]+$")
+# A chat.db chat guid, e.g. "SMS;-;+15551234567" or "any;-;user@example.com"
+_CHAT_GUID_PATTERN = re.compile(r"^[A-Za-z]+;[-+];[+\w@.\-]+$")
 
 
 def _validate_identifier(identifier: str, chat_style: int) -> bool:
@@ -116,17 +118,42 @@ def _service_keyword(service: str | None) -> str:
 
 
 class IMessageSender:
-    def send_text(self, chat_identifier: str, chat_style: int, text: str, service: str | None = None) -> bool:
+    def __init__(self):
+        # Why the most recent send failed (AppleScript stderr), for the UI.
+        self.last_error = ""
+
+    def send_text(self, chat_identifier: str, chat_style: int, text: str, service: str | None = None,
+                  chat_guid: str | None = None) -> bool:
+        self.last_error = ""
         if not _validate_identifier(chat_identifier, chat_style):
             print(f"Invalid chat identifier: {chat_identifier}")
+            self.last_error = "invalid chat identifier"
             return False
         if chat_style == 43:
             return self._send_to_group(chat_identifier, text=text)
-        return self._send_to_buddy(chat_identifier, text=text, service=service)
+        if self._send_to_buddy(chat_identifier, text=text, service=service):
+            return True
+        # Fall back to the existing thread itself, addressed by its chat.db
+        # guid, so Messages routes it on whatever service that thread uses.
+        # Covers a service keyword this macOS build's AppleScript rejects.
+        if chat_guid and _CHAT_GUID_PATTERN.match(chat_guid):
+            first_error = self.last_error
+            print(f"[IMSG-SEND] participant send failed ({first_error}); retrying via chat id {chat_guid!r}", flush=True)
+            script = """
+tell application "Messages"
+    send (system attribute "IMSG_TEXT") to chat id "%CHAT_ID%"
+end tell
+""".replace("%CHAT_ID%", _as_str(chat_guid))
+            if self._run_applescript(script, env_text=text):
+                return True
+            self.last_error = f"{first_error} / via chat id: {self.last_error}"
+        return False
 
     def send_file(self, chat_identifier: str, chat_style: int, file_path: str, service: str | None = None) -> bool:
+        self.last_error = ""
         if not _validate_identifier(chat_identifier, chat_style):
             print(f"Invalid chat identifier: {chat_identifier}")
+            self.last_error = "invalid chat identifier"
             return False
         # Messages.app's sandbox can only access standard user directories (/tmp,
         # ~/Downloads, ~/Desktop, ~/Documents).  Arbitrary project-relative paths
@@ -271,20 +298,28 @@ tell application "System Events" to tell process "Messages" to keystroke return
             time.sleep(0.5)
         return None
 
-    @staticmethod
-    def _run_applescript(script: str, env_text: str | None = None, env_file: str | None = None) -> bool:
+    def _run_applescript(self, script: str, env_text: str | None = None, env_file: str | None = None) -> bool:
         env = os.environ.copy()
         if env_text is not None:
             env["IMSG_TEXT"] = env_text
         if env_file is not None:
             env["IMSG_FILE"] = env_file
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env,
-        )
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            self.last_error = "Messages did not respond within 10s"
+            print(f"AppleScript error: {self.last_error}", flush=True)
+            return False
+        except OSError as e:
+            self.last_error = f"could not run osascript: {e}"
+            print(f"AppleScript error: {self.last_error}", flush=True)
+            return False
         # Verbose diagnostics for attachment-send debugging (rc is unreliable —
         # see apple/imessage-attachment-debugging skill).
         if env_file is not None:
@@ -294,6 +329,7 @@ tell application "System Events" to tell process "Messages" to keystroke return
                   f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}",
                   flush=True)
         if result.returncode != 0:
+            self.last_error = result.stderr.strip()[:300] or f"osascript exited {result.returncode}"
             print(f"AppleScript error: {result.stderr.strip()}", flush=True)
             return False
         return True
