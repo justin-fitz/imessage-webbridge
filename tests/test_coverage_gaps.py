@@ -638,6 +638,30 @@ class TestAppEndpoints:
         assert resp.status_code == 303
         assert resp.headers["location"] == "/"
 
+    def test_resolve_chat_for_one_person_or_a_group(self, tmp_path):
+        """The New Message composer asks where a set of recipients would land."""
+        client, core = self._make_client(tmp_path)
+        self._login(client)
+        conn = sqlite3.connect(core.config.imessage.db_path)
+        conn.execute("UPDATE chat SET display_name = '' WHERE chat_identifier = 'chat123'")
+        conn.commit()
+        conn.close()
+        one = client.get("/api/contacts/resolve-chat", params={"identifier": "(555) 123-4567"}).json()
+        assert (one["chat_identifier"], one["style"]) == ("+15551234567", 45)
+        group = client.get("/api/contacts/resolve-chat",
+                           params={"identifier": ["+15551234567", "+15559876543"]}).json()
+        assert (group["chat_identifier"], group["style"]) == ("chat123", 43)
+        assert "5551234567" in group["display_name"]
+        # No group with exactly these people: nothing to show, a new one would start.
+        none = client.get("/api/contacts/resolve-chat",
+                          params={"identifier": ["+15551234567", "+15550000000"]}).json()
+        assert none == {"chat_identifier": None}
+        assert client.get("/api/contacts/resolve-chat").json() == {"chat_identifier": None}
+
+    def test_service_worker_not_cached(self, tmp_path):
+        client, _ = self._make_client(tmp_path)
+        assert client.get("/sw.js").headers["cache-control"] == "no-cache"
+
     def test_api_session(self, tmp_path):
         """The page's "am I still signed in?" probe: 401 without a session."""
         client, _ = self._make_client(tmp_path)
@@ -861,6 +885,77 @@ class TestGetRecentChatsContactResolution:
         chats = get_recent_chats(db_path, contacts)
         ind = [c for c in chats if c["chat_identifier"] == "+15551234567"][0]
         assert ind["display_name"] == "John Smith"
+
+
+class TestQueriesStayCorrectWhenBounded:
+    """The message and chat-list queries read a bounded slice of chat.db
+    instead of a chat's whole history; these pin what that must not lose."""
+
+    def test_page_finds_reaction_written_before_its_message(self, tmp_path):
+        """iCloud-synced history can store a tapback with a LOWER rowid than
+        its target; a page still shows it."""
+        from web_server import get_chat_messages
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        conn = sqlite3.connect(db_path)
+        # Reaction rows 50 and 51 target message 60, which comes later.
+        conn.execute("INSERT INTO message (ROWID, guid, text, is_from_me, date, item_type, associated_message_type) "
+                     "VALUES (60, 'late-target', 'target', 0, 1, 0, 0)")
+        conn.execute("INSERT INTO message (ROWID, guid, is_from_me, date, item_type, associated_message_type, associated_message_guid) "
+                     "VALUES (50, 'r-50', 1, 1, 0, 2000, 'p:0/late-target')")
+        conn.execute("INSERT INTO message (ROWID, guid, is_from_me, date, item_type, associated_message_type, associated_message_guid) "
+                     "VALUES (51, 'r-51', 0, 1, 0, 2001, 'bp:late-target')")
+        conn.executemany("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, ?)", [(60,), (50,), (51,)])
+        conn.commit()
+        conn.close()
+        page = get_chat_messages(db_path, "+15551234567", {}, limit=1)   # just message 60
+        assert [m["rowid"] for m in page] == [60]
+        assert len(page[0]["reactions"]) == 2
+
+    def test_page_ignores_other_pages_reactions(self, tmp_path):
+        from web_server import _get_reactions_for_messages
+        db_path = TestReactions()._create_db_with_reactions(str(tmp_path / "chat.db"))
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        everything = _get_reactions_for_messages(conn, "+15551234567")
+        later_page = _get_reactions_for_messages(conn, "+15551234567", since_rowid=10_000, guids=["no-such-guid"])
+        conn.close()
+        assert everything and later_page == {}
+
+    def test_newest_page_first_and_paging(self, tmp_path):
+        from web_server import get_chat_messages
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        newest = get_chat_messages(db_path, "+15551234567", {}, limit=2)
+        older = get_chat_messages(db_path, "+15551234567", {}, limit=2, offset=2)
+        assert [m["rowid"] for m in newest] == [2, 3]     # oldest-first within the page
+        assert [m["rowid"] for m in older] == [1]
+        assert get_chat_messages(db_path, "no-such-chat", {}) == []
+
+    def test_unread_counts_respect_read_horizon(self, tmp_path):
+        import web_server
+        from web_server import get_recent_chats, _init_session_db, _set_read_horizon
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        _init_session_db(str(tmp_path / "state.db"))
+        # Message 2 is incoming and unread (is_read defaults to 0); 1 and 3 are mine.
+        conn = sqlite3.connect(db_path)
+        conn.execute("INSERT INTO message (ROWID, guid, text, is_from_me, date, handle_id, item_type, associated_message_type) "
+                     "VALUES (4, 'guid-4', 'msg 4', 0, 1, 1, 0, 0)")
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 4)")
+        conn.commit()
+        conn.close()
+        chat = [c for c in get_recent_chats(db_path, {}) if c["chat_identifier"] == "+15551234567"][0]
+        assert chat["unread_count"] == 2
+        _set_read_horizon("+15551234567", 2)     # opened in the web UI when 2 was the newest
+        chat = [c for c in get_recent_chats(db_path, {}) if c["chat_identifier"] == "+15551234567"][0]
+        assert chat["unread_count"] == 1
+        # The preview is the last *message*, not a later tapback.
+        conn = sqlite3.connect(db_path)
+        conn.execute("INSERT INTO message (ROWID, guid, is_from_me, date, item_type, associated_message_type, associated_message_guid) "
+                     "VALUES (90, 'r-90', 0, 9999999999999999999, 0, 2000, 'p:0/guid-3')")
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 90)")
+        conn.commit()
+        conn.close()
+        chat = [c for c in get_recent_chats(db_path, {}) if c["chat_identifier"] == "+15551234567"][0]
+        assert chat["last_text"] == "msg 4"
 
 
 class TestGetChatMessagesEdgeCases:
@@ -1224,6 +1319,35 @@ class TestWebSocketEndpoint:
                                      "file_path": path, "client_id": "c1"}))
             data = json.loads(ws.receive_text())
         assert (data["type"], data["ok"], data["rowid"]) == ("send_result", True, 7)
+
+    def test_ws_send_to_unknown_chat_is_refused_out_loud(self, tmp_path):
+        """Not silently dropped: the page was left waiting 75s for a verdict."""
+        client, core = self._make_client(tmp_path)
+        client.cookies.set("session", self._get_session(client))
+        core.sender = MagicMock()
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "send", "chat_identifier": "nope", "chat_style": 45,
+                                     "text": "x", "client_id": "c1"}))
+            data = json.loads(ws.receive_text())
+        assert (data["type"], data["ok"], data["client_id"]) == ("send_result", False, "c1")
+        core.sender.send_text.assert_not_called()
+
+    def test_ws_send_to_chat_created_after_startup(self, tmp_path):
+        """A thread that began after the bridge started (from the phone, say)
+        can be replied to without restarting the bridge."""
+        client, core = self._make_client(tmp_path)
+        client.cookies.set("session", self._get_session(client))
+        conn = sqlite3.connect(core.config.imessage.db_path)
+        conn.execute("INSERT INTO chat (ROWID, chat_identifier, display_name, style) VALUES (9, '+15550009999', '', 45)")
+        conn.commit()
+        conn.close()
+        core.sender = MagicMock()
+        core.sender.send_text.return_value = True
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "send", "chat_identifier": "+15550009999", "chat_style": 45, "text": "hi"}))
+            ws.send_text('{"type": "ping"}')
+            ws.receive_text()
+        core.sender.send_text.assert_called_once()
 
     def test_ws_unknown_chat_ignored(self, tmp_path):
         """Message to unknown chat is ignored."""

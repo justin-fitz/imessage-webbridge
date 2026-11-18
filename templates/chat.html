@@ -635,6 +635,33 @@
     margin-top: 1px;
   }
 
+  #notify-status.warn { color: #ff9f0a; }
+  #notify-test-btn {
+    margin-top: 6px; padding: 4px 10px; background: none; color: #0b84fe;
+    border: 1px solid #0b84fe; border-radius: 6px; font-size: 11px; cursor: pointer;
+  }
+  #notify-offer {
+    display: none;
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #2c2c2e;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 10px 12px 10px 16px;
+    border-radius: 12px;
+    font-size: 13px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    z-index: 150;
+    align-items: center;
+    gap: 10px;
+    max-width: calc(100vw - 24px);
+  }
+  #notify-offer.show { display: flex; }
+  #notify-offer button { border: none; border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+  #notify-offer-yes { background: #0b84fe; color: #fff; }
+  #notify-offer-no { background: #3a3a3c; color: #e0e0e0; }
   #update-banner {
     display: none;
     position: fixed;
@@ -768,6 +795,11 @@
   <div id="status"><div id="status-row"><span class="dot disconnected" id="status-dot"></span><span id="status-text">Connecting...</span><span id="build-label">build {{ build_number }}</span></div><span id="last-checked-label"></span></div>
 </div>
 
+<div id="notify-offer" role="dialog" aria-label="Turn on notifications">
+  <span>Get a notification when a message arrives?</span>
+  <button type="button" id="notify-offer-yes">Turn on</button>
+  <button type="button" id="notify-offer-no">Not now</button>
+</div>
 <div id="update-banner">⬆ New version available — tap to reload</div>
 <script>const _BUILD = "{{ build_number }}";</script>
 
@@ -784,7 +816,8 @@
     <div class="pref-row">
       <div>
         <div class="pref-label">Desktop notifications</div>
-        <div class="pref-desc">Show browser notifications for new messages</div>
+        <div class="pref-desc" id="notify-status">Show a notification for new messages</div>
+        <button type="button" id="notify-test-btn" style="display:none">Send a test notification</button>
       </div>
       <label class="toggle"><input type="checkbox" id="pref-notify"><span class="slider"></span></label>
     </div>
@@ -1099,9 +1132,11 @@ function handleServerEvent(data) {
         markRead(state.chatId, data.rowid);
       }
       showLastStatus();
-      if (!data.is_from_me && document.hidden) {
+      // An installed app's window is never "hidden" just because another
+      // app is in front of it, so ask whether it has focus as well.
+      if (!data.is_from_me && (document.hidden || !document.hasFocus())) {
         const senderName = (data.chat_style == 43 && data.chat_display_name) ? `${data.sender_id} (${data.chat_display_name})` : (data.sender_id || data.chat_display_name || data.chat_identifier);
-        showNotification(senderName, data.text);
+        showNotification(senderName, data.text, data.chat_identifier);
         startFlash(`New message from ${senderName}`);
       }
     } else if (!data.is_from_me) {
@@ -1112,7 +1147,7 @@ function handleServerEvent(data) {
 
       // Notifications for messages not in current view
       const senderName = (data.chat_style == 43 && data.chat_display_name) ? `${data.sender_id} (${data.chat_display_name})` : (data.sender_id || data.chat_display_name || cid);
-      showNotification(senderName, data.text);
+      showNotification(senderName, data.text, cid);
       startFlash(`New message from ${senderName}`);
     }
     updateSidebarPreview(data);
@@ -1347,12 +1382,50 @@ function scrollMessagesToEnd() {
   });
 }
 
-// Load the open conversation from scratch. Safe against the user clicking
-// another chat while this one is still loading, and against the load failing.
+// Conversations you've had open, set aside as they were (bubbles, scroll
+// position, older pages already loaded) so going back to one is instant
+// instead of a blank "Loading…" and a round trip. On return it's topped up
+// from the server in the background.
+const chatViews = new Map();           // chatId -> {frag, at, msgOffset, hasMore, scrollTop, atBottom}
+const CHAT_VIEW_MAX = 12;
+const CHAT_VIEW_MAX_AGE = 45 * 60000;  // attachment links in a view stop working after an hour
+
+function stashView(chatId) {
+  const el = document.getElementById('messages');
+  if (!chatId || !el.querySelector('.msg')) return;
+  const view = {
+    frag: document.createDocumentFragment(),
+    at: Date.now(),
+    msgOffset: state.msgOffset,
+    hasMore: state.hasMore,
+    scrollTop: el.scrollTop,
+    atBottom: el.scrollHeight - el.scrollTop - el.clientHeight < 160,
+  };
+  while (el.firstChild) view.frag.appendChild(el.firstChild);
+  chatViews.delete(chatId);
+  chatViews.set(chatId, view);
+  if (chatViews.size > CHAT_VIEW_MAX) chatViews.delete(chatViews.keys().next().value);
+}
+
+// Load the open conversation. Safe against the user clicking another chat
+// while this one is still loading, and against the load failing.
 async function loadOpenChat() {
   const chatId = state.chatId;
   if (!chatId) return;
   const el = document.getElementById('messages');
+  const view = chatViews.get(chatId);
+  chatViews.delete(chatId);
+  if (view && Date.now() - view.at < CHAT_VIEW_MAX_AGE) {
+    el.innerHTML = '';
+    el.appendChild(view.frag);
+    state.msgOffset = view.msgOffset;
+    state.hasMore = view.hasMore;
+    el.scrollTop = view.atBottom ? el.scrollHeight : view.scrollTop;
+    showLastStatus();
+    updateFocusBanner();
+    await syncOpenChat();   // whatever happened in it since
+    return;
+  }
   el.innerHTML = '<div class="msgs-note">Loading…</div>';
   const messages = await api(`/api/chats/${encodeURIComponent(chatId)}/messages`);
   if (state.chatId !== chatId) return;   // moved to another chat meanwhile; that load owns the screen
@@ -1373,6 +1446,19 @@ async function loadOpenChat() {
   scrollMessagesToEnd();
   // Persist read horizon so unread badges don't reappear on page reload.
   markRead(chatId, Math.max(0, ...messages.map(m => m.rowid || 0)));
+}
+
+// What a bubble shows, apart from its delivery status. Attachment links are
+// left out: the server hands out fresh ones on every load.
+function msgSig(msg) {
+  return [normText(msg.text), (msg.reactions || []).map(r => r.emoji + (r.is_from_me ? '!' : '')).join(''),
+          (msg.attachments || []).length].join('\u0001');
+}
+
+function replaceBubble(bubble, msg) {
+  const holder = bubble.closest('.msg-group-wrap') || bubble;
+  const showAvatar = !holder.querySelector('.msg-avatar.hidden');
+  holder.replaceWith(createMessageElement(msg, showAvatar));
 }
 
 function setBubbleStatus(bubble, status) {
@@ -1434,7 +1520,11 @@ async function syncOpenChat() {
   let newestIncoming = 0;
   for (const msg of messages) {
     const have = onScreen.get(String(msg.rowid));
-    if (have) { if (msg.is_from_me) setBubbleStatus(have, msg.status); continue; }
+    if (have) {
+      if (have._sig !== undefined && have._sig !== msgSig(msg)) replaceBubble(have, msg);
+      else if (msg.is_from_me) setBubbleStatus(have, msg.status);
+      continue;
+    }
     if (msg.is_from_me && adoptPending(msg)) continue;
     if (msg.rowid > maxRowid) {
       appendMessage(msg);
@@ -1514,6 +1604,7 @@ function leaveChatView() {
   if (state.chatId) {
     if (input.value) state.drafts[state.chatId] = input.value; else delete state.drafts[state.chatId];
   }
+  stashView(state.chatId);
   // No conversation is on screen any more, so new messages count as unread again.
   state.chatId = null;
   input.value = '';
@@ -1533,11 +1624,18 @@ document.getElementById('back-btn').addEventListener('click', () => {
 window.addEventListener('popstate', leaveChatView);
 
 // --- Chat selection ---
-document.getElementById('chat-list').addEventListener('click', async (e) => {
+document.getElementById('chat-list').addEventListener('click', (e) => {
   const item = e.target.closest('.chat-item');
-  if (!item) return;
+  if (item) openChat(item);
+});
 
+async function openChat(item) {
+  if (item.dataset.chatId === state.chatId && document.querySelector('#messages .msg')) {
+    document.getElementById('msg-input').focus();   // already showing it
+    return;
+  }
   stopFlash();
+  stashView(state.chatId);   // keep the conversation being left, to come back to instantly
   document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
   item.classList.add('active');
   document.getElementById('new-msg-header').style.display = 'none';
@@ -1579,9 +1677,10 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   msgInput.style.height = 'auto';
   if (msgInput.value) msgInput.style.height = Math.min(msgInput.scrollHeight, 150) + 'px';
   msgInput.focus();
+  clearNotifications(state.chatId);
 
   await loadOpenChat();
-});
+}
 // Tint the composer green for SMS/RCS threads, blue for iMessage.
 function applyServiceTheme() {
   const isSms = state.service && state.service !== 'iMessage' && state.service !== 'iMessageLite';
@@ -1595,6 +1694,25 @@ async function sendMessage() {
   const input = document.getElementById('msg-input');
   const text = input.value.trim();
   if (!text && !pendingFile) return;
+
+  if (!state.chatId && newMsgRecipients.length === 0) {
+    if (document.getElementById('new-msg-header').style.display !== 'none') {
+      composeNote('Add at least one person in the To: line first.');
+      document.getElementById('contact-search').focus();
+    }
+    return;
+  }
+
+  // New message to people you already have a conversation with: step into
+  // that conversation (its history is already on screen) and send normally.
+  if (!state.chatId && newMsgThread) {
+    const t = newMsgThread;
+    newMsgThread = null;
+    stashView(t.chat_identifier);   // the preview becomes this chat's view: no reload
+    await openChatById(t.chat_identifier, t.style, t.name);
+    input.value = text;
+    return sendMessage();
+  }
 
   // New message mode — send via API to new recipients
   if (!state.chatId && newMsgRecipients.length > 0) {
@@ -1620,8 +1738,10 @@ async function sendMessage() {
       document.getElementById('new-msg-header').style.display = 'none';
       const chats = await api('/api/chats');
       if (chats) refreshChatList(chats);
+      newMsgRecipients.length = 0;
+      renderRecipients();
       // Jump into the (possibly brand-new group) thread so follow-ups go over WS
-      if (res.chat_identifier) openChatById(res.chat_identifier, res.chat_style, res.display_name);
+      if (res.chat_identifier) await openChatById(res.chat_identifier, res.chat_style, res.display_name);
     } else {
       const j = await resp.json().catch(() => ({}));
       alert(j.detail || `Send failed (${resp.status})`);
@@ -1877,6 +1997,7 @@ function createMessageElement(msg, showAvatar) {
   msgDiv.className = `msg ${msg.is_from_me ? 'from-me' : 'from-them'}${msg.is_from_me && isSms ? ' sms' : ''}`;
   if (fromThem && isGroup) msgDiv.dataset.sender = msg.sender_id || '';
   if (msg.rowid) msgDiv.dataset.rowid = msg.rowid;
+  if (!msg.client_id) msgDiv._sig = msgSig(msg);
   if (msg.client_id) {
     // Drawn here on Send, before Messages has a row for it. Kept so the row
     // can be matched to this bubble when it turns up (see adoptPending).
@@ -2220,16 +2341,13 @@ document.getElementById('prefs-overlay').addEventListener('click', (e) => {
 
 // Request notification permission when toggled on
 document.getElementById('pref-notify').addEventListener('change', async (e) => {
-  if (e.target.checked && Notification.permission === 'default') {
-    const perm = await Notification.requestPermission();
-    if (perm !== 'granted') {
-      e.target.checked = false;
-    }
-  } else if (e.target.checked && Notification.permission === 'denied') {
-    e.target.checked = false;
-    alert('Notifications are blocked. Enable them in your browser settings for this site.');
+  if (e.target.checked && 'Notification' in window && Notification.permission === 'default') {
+    await Notification.requestPermission();
   }
+  // Left on even if the system is still refusing: the line below the switch
+  // says what's wrong, which a switch that silently flips back never did.
   savePrefs();
+  updateNotifyStatus();
 });
 
 loadPrefs();
@@ -2296,21 +2414,111 @@ window.addEventListener('focus', () => {
 });
 
 // --- Browser notifications ---
-function showNotification(senderName, text) {
-  if (!prefs.notify || Notification.permission !== 'granted') return;
-  const body = text || '(attachment)';
-  const n = new Notification(`${senderName} — iMessage`, {
-    body: body.substring(0, 200),
-    tag: 'imsg-' + senderName,
+// Why a notification can't be shown right now, or '' if it can.
+function notifyBlocker() {
+  if (!('Notification' in window)) return 'This browser has no notification support for this page.';
+  if (Notification.permission === 'denied') return 'Notifications are blocked for this app. Allow them in System Settings > Notifications (or the browser\'s site settings), then try again.';
+  if (Notification.permission !== 'granted') return 'Not allowed yet. Turn the switch on and choose Allow.';
+  return '';
+}
+
+// Post a notification. Through the service worker when there is one: that is
+// the route installed web apps support everywhere (a page-made `new
+// Notification()` is refused outright by some), and it lands in Notification
+// Center, where a click reopens the conversation. Resolves to '' or a reason.
+async function postNotification(title, body, chatId) {
+  const blocked = notifyBlocker();
+  if (blocked) return blocked;
+  const options = {
+    body: (body || '(attachment)').substring(0, 200),
+    tag: 'imsg-' + (chatId || 'test'),
     renotify: true,
     silent: !prefs.sound,
-  });
-  n.onclick = () => {
-    window.focus();
-    n.close();
+    icon: '/static/icon-192.png',
+    data: { chatId: chatId || null },
   };
-  setTimeout(() => n.close(), 8000);
+  try {
+    const reg = navigator.serviceWorker && await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise(resolve => setTimeout(() => resolve(null), 2000)),
+    ]);
+    if (reg && reg.showNotification) { await reg.showNotification(title, options); return ''; }
+  } catch (_) { /* fall back to a page notification */ }
+  try {
+    const n = new Notification(title, options);
+    n.onclick = () => { window.focus(); if (chatId) openChatFromNotification(chatId); n.close(); };
+    return '';
+  } catch (e) {
+    return 'The browser refused to show it (' + (e && e.message || 'unknown reason') + ').';
+  }
 }
+
+function showNotification(senderName, text, chatId) {
+  if (!prefs.notify) return;
+  postNotification(senderName, text, chatId);
+}
+
+// Opening a conversation clears its notifications, like reading it would.
+async function clearNotifications(chatId) {
+  try {
+    const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+    if (!reg || !reg.getNotifications || !chatId) return;
+    (await reg.getNotifications({ tag: 'imsg-' + chatId })).forEach(n => n.close());
+  } catch (_) {}
+}
+
+function openChatFromNotification(chatId) {
+  const item = document.querySelector(`.chat-item[data-chat-id="${CSS.escape(chatId)}"]`);
+  if (item) openChat(item);
+}
+if (navigator.serviceWorker) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'OPEN_CHAT' && e.data.chatId) openChatFromNotification(e.data.chatId);
+  });
+}
+
+// The line under the switch: says whether notifications can actually appear,
+// because the switch alone can be on while the system is refusing them.
+function updateNotifyStatus(extra) {
+  const el = document.getElementById('notify-status');
+  const on = document.getElementById('pref-notify').checked;
+  const blocked = notifyBlocker();
+  document.getElementById('notify-test-btn').style.display = (on && !blocked) ? '' : 'none';
+  if (extra) el.textContent = extra;
+  else if (!on) el.textContent = 'Off. This is set per browser and per installed app.';
+  else if (blocked) el.textContent = blocked;
+  else el.textContent = 'On. You get one when a message arrives and this window isn\'t in front.';
+  el.classList.toggle('warn', on && !!blocked);
+}
+
+document.getElementById('notify-test-btn').addEventListener('click', async () => {
+  const why = await postNotification('Test notification', 'If you can read this, notifications work.', null);
+  updateNotifyStatus(why || 'Sent. If nothing appeared, macOS is holding it back: check System Settings > Notifications for this app (or for your browser), and that no Focus is on.');
+});
+
+// Installed as an app, notifications are off until asked for (an installed
+// app doesn't share the browser's saved preferences). Offer once.
+function maybeOfferNotifications() {
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  if (!standalone || prefs.notify || !('Notification' in window) || Notification.permission === 'denied') return;
+  try { if (localStorage.getItem('imsg-notify-offered')) return; } catch (_) { return; }
+  document.getElementById('notify-offer').classList.add('show');
+}
+document.getElementById('notify-offer-yes').addEventListener('click', async () => {
+  document.getElementById('notify-offer').classList.remove('show');
+  try { localStorage.setItem('imsg-notify-offered', '1'); } catch (_) {}
+  const perm = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+  document.getElementById('pref-notify').checked = perm === 'granted';
+  savePrefs();
+  updateNotifyStatus();
+  if (perm === 'granted') postNotification('Notifications are on', 'New messages will show up like this.', null);
+});
+document.getElementById('notify-offer-no').addEventListener('click', () => {
+  document.getElementById('notify-offer').classList.remove('show');
+  try { localStorage.setItem('imsg-notify-offered', '1'); } catch (_) {}
+});
+maybeOfferNotifications();
+updateNotifyStatus();
 
 // --- New Message ---
 const newMsgRecipients = [];
@@ -2318,6 +2526,12 @@ let contactSearchTimeout = null;
 
 document.getElementById('new-msg-btn').addEventListener('click', () => {
   // Enter new message mode
+  const input = document.getElementById('msg-input');
+  if (state.chatId) {
+    if (input.value) state.drafts[state.chatId] = input.value; else delete state.drafts[state.chatId];
+    input.value = '';
+  }
+  stashView(state.chatId);
   state.chatId = null;
   document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
   document.getElementById('chat-header').textContent = 'New Message';
@@ -2333,6 +2547,7 @@ document.getElementById('new-msg-btn').addEventListener('click', () => {
   // Clear previous recipients
   newMsgRecipients.length = 0;
   renderRecipients();
+  refreshNewMsgThread();
   document.getElementById('contact-search').value = '';
   document.getElementById('contact-results').classList.remove('open');
   document.getElementById('contact-search').focus();
@@ -2348,14 +2563,100 @@ function renderRecipients() {
     chip.innerHTML = `${escapeHtml(r.name)}<span class="remove-recipient" data-idx="${i}">&times;</span>`;
     area.insertBefore(chip, input);
   });
+  input.placeholder = newMsgRecipients.length ? 'Add another person…' : 'Name, phone number or email';
 }
 
 document.getElementById('new-msg-to-area').addEventListener('click', (e) => {
   if (e.target.classList.contains('remove-recipient')) {
     newMsgRecipients.splice(parseInt(e.target.dataset.idx), 1);
     renderRecipients();
+    refreshNewMsgThread();
   }
+  document.getElementById('contact-search').focus();
 });
+
+// Picking people only ever adds them to the To: line; nothing is opened or
+// sent until you press Send, so there's always room to add someone else.
+// Under the To: line the page shows where the message will go: the existing
+// conversation with exactly these people (and its history), or a new one.
+let newMsgThread = null;   // {chat_identifier, style, name} of that existing conversation
+let _newMsgSeq = 0;
+
+function addRecipient(name, identifier) {
+  if (!identifier || newMsgRecipients.some(r => r.identifier === identifier)) return;
+  newMsgRecipients.push({ name: name || identifier, identifier });
+  renderRecipients();
+  const search = document.getElementById('contact-search');
+  search.value = '';
+  document.getElementById('contact-results').classList.remove('open');
+  contactActiveIdx = -1;
+  search.focus();
+  refreshNewMsgThread();
+}
+
+// A phone number or email typed straight in, for someone not in Contacts.
+function looksLikeAddress(text) {
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) return true;
+  return /^\+?[\d\s().-]{7,}$/.test(text) && text.replace(/\D/g, '').length >= 7;
+}
+
+// "+1 (555) 010-0009" as typed -> "+15550100009" as Messages wants it.
+function typedAddress(text) {
+  if (text.includes('@')) return text.toLowerCase();
+  const digits = text.replace(/\D/g, '');
+  if (text.trim().startsWith('+')) return '+' + digits;
+  if (digits.length === 10) return '+1' + digits;
+  if (digits.length === 11 && digits[0] === '1') return '+' + digits;
+  return digits;
+}
+
+async function refreshNewMsgThread() {
+  const seq = ++_newMsgSeq;
+  const el = document.getElementById('messages');
+  const stale = () => seq !== _newMsgSeq || state.chatId !== null;
+  newMsgThread = null;
+  document.getElementById('focus-banner').style.display = 'none';
+  if (newMsgRecipients.length === 0) { el.innerHTML = ''; return; }
+  const names = newMsgRecipients.map(r => r.name).join(', ');
+
+  let found = null;
+  if (newMsgRecipients.length === 1) {
+    // Fast path: the chat is already in the sidebar. Match by identifier, then
+    // by contact name (the same person may be stored under phone vs email).
+    const { identifier, name } = newMsgRecipients[0];
+    let item = document.querySelector(`.chat-item[data-chat-id="${CSS.escape(identifier)}"]`);
+    if (!item && name) {
+      item = [...document.querySelectorAll('.chat-item')].find(
+        c => c.dataset.chatName === name && c.dataset.chatStyle !== '43');
+    }
+    if (item) found = { chat_identifier: item.dataset.chatId, style: parseInt(item.dataset.chatStyle) || 45, name: item.dataset.chatName };
+  }
+  if (!found) {
+    // The sidebar only lists the 50 most recent of thousands of chats; ask the server.
+    const qs = newMsgRecipients.map(r => 'identifier=' + encodeURIComponent(r.identifier)).join('&');
+    const data = await api('/api/contacts/resolve-chat?' + qs);
+    if (stale()) return;
+    if (data && data.chat_identifier) found = { chat_identifier: data.chat_identifier, style: data.style || 45, name: data.display_name || names };
+  }
+  if (!found) {
+    el.innerHTML = `<div class="msgs-note">${newMsgRecipients.length > 1
+      ? 'This starts a new group conversation with ' + escapeHtml(names) + '.'
+      : 'No earlier conversation with ' + escapeHtml(names) + '.'}</div>`;
+    return;
+  }
+  newMsgThread = found;
+  el.innerHTML = '<div class="msgs-note">Loading…</div>';
+  const messages = await api(`/api/chats/${encodeURIComponent(found.chat_identifier)}/messages`);
+  if (stale()) return;
+  state.chatStyle = found.style;   // group threads draw sender names and avatars
+  el.innerHTML = '';
+  if (messages) {
+    el.appendChild(buildMessageNodes(messages).frag);
+    state.msgOffset = messages.length;
+    state.hasMore = messages.length >= 100;
+    scrollMessagesToEnd();
+  }
+}
 
 document.getElementById('contact-search').addEventListener('input', (e) => {
   const q = e.target.value.trim();
@@ -2405,6 +2706,25 @@ document.getElementById('contact-search').addEventListener('keydown', (e) => {
   const container = document.getElementById('contact-results');
   const open = container.classList.contains('open');
   const items = [...container.querySelectorAll('.contact-result')];
+  const typed = e.target.value.trim();
+  if (e.key === 'Backspace' && e.target.value === '' && newMsgRecipients.length) {
+    newMsgRecipients.pop();
+    renderRecipients();
+    refreshNewMsgThread();
+    return;
+  }
+  if ((e.key === 'Enter' || e.key === ',' || e.key === 'Tab') && typed
+      && (!open || items.length === 0 || contactActiveIdx < 0) && looksLikeAddress(typed)) {
+    e.preventDefault();
+    clearTimeout(contactSearchTimeout);
+    addRecipient(typed, typedAddress(typed));
+    return;
+  }
+  if (e.key === 'Enter' && !typed && newMsgRecipients.length) {
+    e.preventDefault();
+    document.getElementById('msg-input').focus();   // done adding people; on to the message
+    return;
+  }
   if (!open || items.length === 0) return;
 
   if (e.key === 'ArrowDown') {
@@ -2425,54 +2745,8 @@ document.getElementById('contact-search').addEventListener('keydown', (e) => {
 });
 
 // Select a contact-result element (shared by click + keyboard Enter).
-async function selectContactResult(item) {
-  if (!item) return;
-  const identifier = item.dataset.id;
-  const name = item.dataset.name;
-
-  // If this is the first recipient, try to open an existing conversation with
-  // this contact (so history loads) instead of starting a blank composer.
-  if (newMsgRecipients.length === 0) {
-    // 1) Fast path: the chat is already in the sidebar DOM (top-50). Match by
-    //    identifier, then by contact name (same person may be stored under a
-    //    different identifier — phone vs email).
-    let existingChat = document.querySelector(
-      `.chat-item[data-chat-id="${CSS.escape(identifier)}"]`
-    );
-    if (!existingChat && name) {
-      existingChat = [...document.querySelectorAll('.chat-item')].find(
-        el => el.dataset.chatName === name && el.dataset.chatStyle !== '43'
-      );
-    }
-    if (existingChat) {
-      document.getElementById('contact-search').value = '';
-      document.getElementById('contact-results').classList.remove('open');
-      existingChat.click();
-      return;
-    }
-
-    // 2) Slow path: ask the server to resolve this identifier to any existing
-    //    chat (the sidebar only shows 50 of thousands of chats, so the thread
-    //    may exist but be absent from the DOM). If found, open it with history.
-    try {
-      const r = await fetch(`/api/contacts/resolve-chat?identifier=${encodeURIComponent(identifier)}`);
-      if (r.ok) {
-        const data = await r.json();
-        if (data.chat_identifier) {
-          document.getElementById('contact-search').value = '';
-          document.getElementById('contact-results').classList.remove('open');
-          openChatById(data.chat_identifier, data.style || 45, name || data.chat_identifier);
-          return;
-        }
-      }
-    } catch (_) { /* fall through to blank composer */ }
-  }
-
-  newMsgRecipients.push({ name, identifier });
-  renderRecipients();
-  document.getElementById('contact-search').value = '';
-  document.getElementById('contact-results').classList.remove('open');
-  document.getElementById('contact-search').focus();
+function selectContactResult(item) {
+  if (item) addRecipient(item.dataset.name, item.dataset.id);
 }
 
 // Open a chat by identifier directly (no sidebar .chat-item needed). Injects a
@@ -2490,7 +2764,7 @@ function openChatById(chatId, chatStyle, chatName) {
     item.innerHTML = `<div class="chat-item-row"><div class="chat-item-name">${escapeHtml(chatName)}</div><span class="unread-badge">0</span></div><div class="chat-item-preview"></div>`;
     listEl.insertBefore(item, listEl.firstChild);
   }
-  item.click();
+  return openChat(item);
 }
 
 document.getElementById('contact-results').addEventListener('click', (e) => {

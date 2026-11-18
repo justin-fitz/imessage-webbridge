@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-from fastapi import Cookie, FastAPI, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Cookie, FastAPI, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -460,6 +460,17 @@ class StatusPoller:
             self._read_cache = {k: v for k, v in self._read_cache.items() if k in keep}
 
 
+def _chat_title(db_path: str, chat_identifier: str, contacts: dict[str, str]) -> str:
+    """A group's own name if it has one, else its members' names."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        row = conn.execute("SELECT display_name FROM chat WHERE chat_identifier = ? ORDER BY ROWID DESC LIMIT 1",
+                           (chat_identifier,)).fetchone()
+    finally:
+        conn.close()
+    return (row[0] if row and row[0] else "") or group_display_name(db_path, chat_identifier, contacts)
+
+
 def group_display_name(db_path: str, chat_identifier: str, contacts: dict[str, str]) -> str:
     """Name for an unnamed group chat: the members, resolved through Contacts."""
     members = get_group_members(db_path, chat_identifier)
@@ -545,51 +556,54 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
 
-    # Inline the horizons as a VALUES CTE. The table holds at most one row per
-    # dismissed chat, so this stays small and keeps the query single-database.
-    horizons = _read_horizons()
-    horizon_params: list = []
-    if horizons:
-        values = ", ".join(["(?, ?)"] * len(horizons))
-        for chat_id, max_rowid in horizons.items():
-            horizon_params += [chat_id, max_rowid]
-        horizon_cte = f"horizons(chat_identifier, max_rowid) AS (VALUES {values}), "
-        horizon_expr = """COALESCE(
-                (SELECT max_rowid FROM horizons
-                 WHERE chat_identifier = c.chat_identifier), 0)"""
-    else:
-        horizon_cte = ""
-        horizon_expr = "0"
-
-    rows = conn.execute(f"""
-        WITH {horizon_cte}last_msgs AS (
-            SELECT cmj.chat_id AS chat_id, MAX(m.ROWID) AS last_rowid
-            FROM message m
-            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-            WHERE m.item_type = 0 AND m.associated_message_type = 0
-            GROUP BY cmj.chat_id
+    # Two things made this take a full second on a large chat.db, on every
+    # page load and every re-sync:
+    #   * "last message per chat" grouped over every message ever received.
+    #     Instead, for each chat, step back through its (chat_id, message_id)
+    #     index to the first displayable message: a few index reads per chat.
+    #   * the unread count walked each listed chat's whole history. Instead,
+    #     start from the (few) unread incoming messages and group them by chat.
+    rows = conn.execute("""
+        WITH last_msgs AS (
+            SELECT c.ROWID AS chat_id,
+                   (SELECT j.message_id
+                    FROM chat_message_join j
+                    CROSS JOIN message m ON m.ROWID = j.message_id
+                    WHERE j.chat_id = c.ROWID
+                      AND m.item_type = 0 AND m.associated_message_type = 0
+                    ORDER BY j.message_id DESC
+                    LIMIT 1) AS last_rowid
+            FROM chat c
         )
-        SELECT c.chat_identifier, c.display_name, c.style, c.service_name,
+        SELECT c.ROWID AS chat_rowid, c.chat_identifier, c.display_name, c.style, c.service_name,
                last_msg.service AS last_service,
                last_msg.date AS last_date,
                last_msg.text AS last_text,
                last_msg.attributedBody AS last_attributed_body,
-               last_msg.cache_has_attachments AS last_has_attachments,
-               (SELECT COUNT(*) FROM message mu
-                JOIN chat_message_join cmju ON mu.ROWID = cmju.message_id
-                WHERE cmju.chat_id = c.ROWID
-                  AND mu.is_from_me = 0
-                  AND mu.is_read = 0
-                  AND mu.item_type = 0
-                  AND mu.associated_message_type = 0
-                  AND mu.ROWID > {horizon_expr}
-               ) AS unread_count
+               last_msg.cache_has_attachments AS last_has_attachments
         FROM chat c
         JOIN last_msgs lm ON lm.chat_id = c.ROWID
         JOIN message last_msg ON last_msg.ROWID = lm.last_rowid
         ORDER BY last_msg.date DESC
         LIMIT ?
-    """, (*horizon_params, limit)).fetchall()
+    """, (limit,)).fetchall()
+
+    # Unread incoming messages per chat, ignoring those at or below the chat's
+    # read horizon (already seen in the web UI; see webapp_read_horizon).
+    horizons = _read_horizons()
+    unread: dict[int, int] = {}
+    for chat_rowid, chat_identifier, msg_rowid in conn.execute("""
+        SELECT cmj.chat_id, c.chat_identifier, mu.ROWID
+        FROM message mu
+        JOIN chat_message_join cmj ON cmj.message_id = mu.ROWID
+        JOIN chat c ON c.ROWID = cmj.chat_id
+        WHERE mu.is_read = 0
+          AND mu.is_from_me = 0
+          AND mu.item_type = 0
+          AND mu.associated_message_type = 0
+    """):
+        if msg_rowid > horizons.get(chat_identifier, 0):
+            unread[chat_rowid] = unread.get(chat_rowid, 0) + 1
     conn.close()
 
     chats = []
@@ -621,7 +635,7 @@ def get_recent_chats(db_path: str, contacts: dict[str, str], limit: int = 50) ->
             # thread pinned to "RCS"), which mis-colored the composer green.
             "service": row["last_service"] or row["service_name"],
             "last_text": last_text,
-            "unread_count": row["unread_count"] or 0,
+            "unread_count": unread.get(row["chat_rowid"], 0),
         })
     return _sanitize(chats)
 
@@ -648,14 +662,17 @@ def find_chat_for_identifier(db_path: str, identifier: str) -> dict | None:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     # Only individual chats (style 45) with at least one message, most-recent first.
+    # "Most recent" = highest message id, read straight off the join table's
+    # index (aggregating every message's date took about a second).
     rows = conn.execute("""
-        SELECT c.chat_identifier, c.style, MAX(m.date) AS last_date
-        FROM chat c
-        JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
-        JOIN message m ON m.ROWID = cmj.message_id
-        WHERE c.style = 45
-        GROUP BY c.ROWID
-        ORDER BY last_date DESC
+        SELECT chat_identifier, style, last_id FROM (
+            SELECT c.chat_identifier, c.style,
+                   (SELECT MAX(j.message_id) FROM chat_message_join j WHERE j.chat_id = c.ROWID) AS last_id
+            FROM chat c
+            WHERE c.style = 45
+        )
+        WHERE last_id IS NOT NULL
+        ORDER BY last_id DESC
     """).fetchall()
     conn.close()
 
@@ -715,17 +732,60 @@ def _extract_custom_emoji(text: str | None, attributed_body: bytes | None) -> st
     return m.group(1) if m else None
 
 
-def _get_reactions_for_messages(conn, chat_identifier: str) -> dict[str, list[dict]]:
-    """Load all reactions for a chat, keyed by target message guid."""
-    rows = conn.execute("""
+def _chat_rowids(conn, chat_identifier: str) -> list[int]:
+    """chat.ROWIDs for an identifier (usually one; the same identifier can have
+    a row per service)."""
+    return [r[0] for r in conn.execute("SELECT ROWID FROM chat WHERE chat_identifier = ?", (chat_identifier,))]
+
+
+def _chat_id_filter(chat_ids: list[int]) -> str:
+    """SQL for "cmj is in one of these chats". A single id is written as an
+    equality so SQLite can read the (chat_id, message_id) index in order."""
+    if len(chat_ids) == 1:
+        return "cmj.chat_id = ?"
+    return f"cmj.chat_id IN ({', '.join('?' * len(chat_ids))})"
+
+
+# Prefixes Messages puts in front of the target guid in associated_message_guid:
+# none, "bp:" (whole bubble), or "p:N/" (part N of a multi-part message).
+_REACTION_GUID_PREFIXES = ("", "bp:") + tuple(f"p:{n}/" for n in range(6))
+
+
+def _get_reactions_for_messages(conn, chat_identifier: str, since_rowid: int = 0,
+                                guids: list[str] | None = None) -> dict[str, list[dict]]:
+    """Load a chat's reactions, keyed by target message guid.
+
+    With no arguments beyond the chat, loads every reaction in it (a busy
+    thread holds thousands). A page of messages passes `since_rowid` (its
+    oldest message) and its `guids`:
+      * a tapback is normally written after its target, so the chat's rows
+        from `since_rowid` on cover almost everything;
+      * history synced from iCloud can land out of order, so older rows are
+        also looked up by target guid, through the index on that column.
+    """
+    chat_ids = _chat_rowids(conn, chat_identifier)
+    if not chat_ids:
+        return {}
+    rows = conn.execute(f"""
         SELECT m.associated_message_type, m.associated_message_guid,
                m.is_from_me, m.text, m.attributedBody
-        FROM message m
-        JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-        JOIN chat c ON cmj.chat_id = c.ROWID
-        WHERE c.chat_identifier = ?
+        FROM chat_message_join cmj
+        CROSS JOIN message m ON m.ROWID = cmj.message_id
+        WHERE {_chat_id_filter(chat_ids)}
+          AND cmj.message_id >= ?
           AND m.associated_message_type >= 2000
-    """, (chat_identifier,)).fetchall()
+    """, (*chat_ids, since_rowid)).fetchall()
+    if guids and since_rowid > 0:
+        targets = [prefix + g for g in guids for prefix in _REACTION_GUID_PREFIXES]
+        for i in range(0, len(targets), 900):   # stay under SQLite's bound-parameter limit
+            chunk = targets[i:i + 900]
+            rows += conn.execute(f"""
+                SELECT associated_message_type, associated_message_guid, is_from_me, text, attributedBody
+                FROM message
+                WHERE associated_message_guid IN ({', '.join('?' * len(chunk))})
+                  AND associated_message_type >= 2000
+                  AND ROWID < ?
+            """, (*chunk, since_rowid)).fetchall()
 
     # Build reactions, then remove any that have a corresponding 3000+ removal
     reactions: dict[str, list[dict]] = {}
@@ -733,7 +793,9 @@ def _get_reactions_for_messages(conn, chat_identifier: str) -> dict[str, list[di
 
     for row in rows:
         guid = row["associated_message_guid"]
-        msg_guid = guid.split("/")[-1] if "/" in guid else guid
+        # "p:0/GUID", "bp:GUID" or bare GUID. ("bp:" wasn't stripped, so
+        # tapbacks on a whole bubble were filed under a key nothing looked up.)
+        msg_guid = guid.split("/")[-1] if "/" in guid else guid.removeprefix("bp:")
         rtype = row["associated_message_type"]
         is_from_me = bool(row["is_from_me"])
 
@@ -805,29 +867,40 @@ def _get_known_chat_identifiers(db_path: str) -> set[str]:
 def get_chat_messages(db_path: str, chat_identifier: str, contacts: dict[str, str], limit: int = 100, offset: int = 0) -> list[dict]:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute("""
+    chat_ids = _chat_rowids(conn, chat_identifier)
+    if not chat_ids:
+        conn.close()
+        return []
+    # Start from chat_message_join and walk its (chat_id, message_id) index
+    # newest-first, stopping after `limit` rows. Starting from the chat's whole
+    # history and sorting it (what the planner did with `message` first) cost
+    # most of a second on a thread with hundreds of thousands of messages, on
+    # every single switch to it. CROSS JOIN pins the join order.
+    rows = conn.execute(f"""
         SELECT m.ROWID, m.guid, m.text, m.is_from_me, m.date, m.attributedBody,
                m.cache_has_attachments, m.service, m.was_delivered_quietly,
                m.date_delivered, m.date_read, COALESCE(m.error, 0) AS error, h.id as sender_id,
                m.thread_originator_guid,
                orig.text as reply_to_text, orig.attributedBody as reply_to_body,
                orig.is_from_me as reply_to_from_me, h2.id as reply_to_sender
-        FROM message m
-        JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-        JOIN chat c ON cmj.chat_id = c.ROWID
+        FROM chat_message_join cmj
+        CROSS JOIN message m ON m.ROWID = cmj.message_id
         LEFT JOIN handle h ON m.handle_id = h.ROWID
         LEFT JOIN message orig ON m.thread_originator_guid = orig.guid
         LEFT JOIN handle h2 ON orig.handle_id = h2.ROWID
-        WHERE c.chat_identifier = ?
+        WHERE {_chat_id_filter(chat_ids)}
           AND m.item_type = 0
           AND m.associated_message_type = 0
-        ORDER BY m.ROWID DESC
+        ORDER BY cmj.message_id DESC
         LIMIT ? OFFSET ?
-    """, (chat_identifier, limit, offset)).fetchall()
+    """, (*chat_ids, limit, offset)).fetchall()
 
     from imessage_reader import IMessageReader
 
-    reactions = _get_reactions_for_messages(conn, chat_identifier)
+    # Only reactions that can apply to this page, not the chat's whole history.
+    oldest = min((r["ROWID"] for r in rows), default=0)
+    reactions = _get_reactions_for_messages(conn, chat_identifier, since_rowid=oldest,
+                                            guids=[r["guid"] for r in rows if r["guid"]])
 
     messages = []
     for row in reversed(rows):
@@ -1058,8 +1131,10 @@ def create_app(core: AppCore) -> FastAPI:
     async def service_worker():
         with open(_sw_path) as f:
             content = f.read()
+        # no-cache: a service worker fix should reach an installed app on its
+        # next launch, not whenever the browser's cached copy happens to age out.
         return Response(content=content, media_type="application/javascript",
-                        headers={"Service-Worker-Allowed": "/"})
+                        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
 
     _init_session_db(core.config.app.state_db)
     # Temp dir can contain decrypted message attachments (HEIC→JPEG conversions).
@@ -1350,19 +1425,31 @@ def create_app(core: AppCore) -> FastAPI:
         return search_contacts(q, contact_store.contacts)
 
     @app.get("/api/contacts/resolve-chat")
-    async def resolve_chat(identifier: str = "", session: str | None = Cookie(default=None, alias="session")):
-        """Find an existing individual chat for a contact identifier, if any.
+    async def resolve_chat(identifier: list[str] = Query(default=[]),
+                           session: str | None = Cookie(default=None, alias="session")):
+        """Find the existing conversation with exactly these people, if any.
 
-        Used by the composer so picking a contact opens their existing thread
-        (with history) even when that chat is outside the 50-chat sidebar list.
-        Returns {chat_identifier, style} or {chat_identifier: null}.
+        Used by the New Message composer to show the thread a message is about
+        to go into (with its history), even when that chat is outside the
+        50-chat sidebar list. One `identifier` resolves a 1:1 chat; repeat the
+        parameter for a group. Returns {chat_identifier, style, display_name}
+        or {chat_identifier: null}.
         """
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
-        if not identifier:
-            return {"chat_identifier": None}
-        match = find_chat_for_identifier(core.config.imessage.db_path, identifier)
-        return match or {"chat_identifier": None}
+        ids = [i for i in identifier if i]
+        db_path = core.config.imessage.db_path
+        if len(ids) == 1:
+            match = await asyncio.to_thread(find_chat_for_identifier, db_path, ids[0])
+            if match:
+                match["display_name"] = resolve_identifier(match["chat_identifier"], contact_store.contacts) or match["chat_identifier"]
+            return match or {"chat_identifier": None}
+        if len(ids) > 1:
+            group = await asyncio.to_thread(find_group_chat, db_path, ids)
+            if group:
+                name = await asyncio.to_thread(_chat_title, db_path, group[0], contact_store.contacts)
+                return {"chat_identifier": group[0], "style": group[1], "display_name": name}
+        return {"chat_identifier": None}
 
     @app.get("/api/contacts/status")
     async def contacts_status(session: str | None = Cookie(default=None, alias="session")):
@@ -1493,6 +1580,7 @@ def create_app(core: AppCore) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
+        nonlocal known_chats
         # Check Origin header before doing anything else (defense against
         # cross-origin WS upgrades that could ride on the session cookie).
         origin = ws.headers.get("origin", "")
@@ -1626,6 +1714,14 @@ def create_app(core: AppCore) -> FastAPI:
                     file_path = msg.get("file_path", "")
 
                     if chat_id not in known_chats:
+                        # The list is read at startup; a thread that began
+                        # since then (say, from the phone) isn't in it yet.
+                        known_chats = await _asyncio.to_thread(_get_known_chat_identifiers, core.config.imessage.db_path)
+                    if chat_id not in known_chats:
+                        # Say so. Dropping it silently left the page waiting
+                        # 75 seconds for a verdict that was never coming.
+                        await _send_result(ws, str(msg.get("client_id", ""))[:64], chat_id, False,
+                                           "The bridge doesn't know this conversation.")
                         continue
                     if not _check_send_rate(session_token):
                         await ws.send_text(json.dumps({"type": "error", "message": "Send rate limit exceeded"}))

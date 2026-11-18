@@ -180,14 +180,12 @@ def find_group_chat(db_path: str, participant_ids: list[str]) -> tuple[str, int]
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
             SELECT c.ROWID as chat_rowid, c.chat_identifier, c.style,
-                   MAX(m.date) as last_date, h.id as handle
+                   (SELECT MAX(j.message_id) FROM chat_message_join j
+                    WHERE j.chat_id = c.ROWID) as last_date, h.id as handle
             FROM chat c
             JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
             JOIN handle h ON chj.handle_id = h.ROWID
-            LEFT JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
-            LEFT JOIN message m ON m.ROWID = cmj.message_id
             WHERE c.style = 43
-            GROUP BY c.ROWID, h.id
         """).fetchall()
         conn.close()
     except Exception:
