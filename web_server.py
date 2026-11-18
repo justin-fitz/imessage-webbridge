@@ -50,8 +50,10 @@ def _sanitize(obj):
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-_SESSION_TTL = 8 * 3600        # absolute lifetime of a login
-_SESSION_IDLE = 2 * 3600       # logged out after this long without activity
+# Defaults; create_app() overrides both from config (session_max_days /
+# session_idle_days). A session ends at whichever limit it hits first.
+_SESSION_TTL = 90 * 86400      # absolute lifetime of a login
+_SESSION_IDLE = 30 * 86400     # logged out after this long without activity
 _session_db: sqlite3.Connection | None = None
 _session_db_path: str | None = None
 _login_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
@@ -219,26 +221,35 @@ def _create_session(ip: str = "") -> str:
     return token
 
 
-def _valid_session(token: str | None) -> bool:
-    """True if the session exists, hasn't hit its absolute or idle limit.
-    Touches last_seen (at most once a minute) so activity keeps it alive."""
+def _session_remaining(token: str | None, touch: bool = True) -> float:
+    """Seconds until this session ends (0 if it is missing or over). A session
+    ends at its absolute expiry or after _SESSION_IDLE without activity,
+    whichever is sooner. With `touch`, counts as activity (at most one write a
+    minute); pass touch=False for server-side checks that say nothing about
+    whether the person is still there."""
     if not token or not _session_db:
-        return False
+        return 0.0
     row = _session_db.execute(
         "SELECT expiry, last_seen FROM sessions WHERE token = ?", (token,)
     ).fetchone()
     if not row:
-        return False
+        return 0.0
     now = time.time()
     expiry, last_seen = row[0], row[1] or now
     if now > expiry or now - last_seen > _SESSION_IDLE:
         _session_db.execute("DELETE FROM sessions WHERE token = ?", (token,))
         _session_db.commit()
-        return False
-    if now - last_seen > 60:
+        return 0.0
+    if touch and now - last_seen > 60:
         _session_db.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (now, token))
         _session_db.commit()
-    return True
+        last_seen = now
+    return max(0.0, min(expiry - now, last_seen + _SESSION_IDLE - now))
+
+
+def _valid_session(token: str | None, touch: bool = True) -> bool:
+    """True if the session exists and hasn't hit its absolute or idle limit."""
+    return _session_remaining(token, touch) > 0
 
 
 def _touch_session(token: str | None) -> None:
@@ -298,16 +309,23 @@ def _rp(request: Request) -> tuple[str, str]:
     return host, origin
 
 
+# WebSocket close codes the web client acts on (application range 4000-4999).
+WS_AUTH_LOST = 4401     # no valid session: sign in again
+WS_TOO_MANY = 4429      # connection limit reached: back off
+
+
 class ConnectionManager:
     def __init__(self, max_connections: int = 20):
         self.active: list[WebSocket] = []
         self.max_connections = max_connections
 
     async def connect(self, ws: WebSocket):
-        if len(self.active) >= self.max_connections:
-            await ws.close(code=1008, reason="Too many connections")
-            return False
         await ws.accept()
+        if len(self.active) >= self.max_connections:
+            # Close *after* accepting: a close during the handshake reaches the
+            # browser as a bare 1006, indistinguishable from a network drop.
+            await ws.close(code=WS_TOO_MANY, reason="Too many connections")
+            return False
         self.active.append(ws)
         return True
 
@@ -899,6 +917,11 @@ LOGIN_HTML = """<!DOCTYPE html>
   .error { color: #ff3b30; font-size: 12px; margin-top: 8px; }
   .alt-link { display: inline-block; margin-top: 16px; color: #8e8e93; font-size: 12px; text-decoration: none; }
   .alt-link:hover { color: #e0e0e0; text-decoration: underline; }
+  button:disabled { opacity: .6; cursor: default; }
+  /* `hidden` must win over the display rules above (it didn't for .alt-link). */
+  [hidden] { display: none !important; }
+  .notice { color: #8e8e93; font-size: 12px; margin: -8px 0 16px; }
+  .hint { color: #636366; font-size: 11px; margin-top: 18px; line-height: 1.4; }
 </style>
 </head><body>
 <script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');</script>
@@ -906,43 +929,35 @@ LOGIN_HTML = """<!DOCTYPE html>
 <div class="card">
   <img src="/static/logo2.svg" alt="" class="login-logo">
   <h2>iMessage Web Gateway</h2>
+  {notice}
   <div id="pk-view"{pk_hidden}>
     <button type="button" id="pk-btn">&#128273; Sign in with passkey</button>
     <div class="error" id="pk-err"></div>
     <a href="#" class="alt-link" id="pw-link">Use password instead</a>
   </div>
   <form id="pw-form" method="POST" action="/login"{pw_hidden}>
-    <input type="password" name="password" id="pw-input" placeholder="Password" autocomplete="current-password">
-    <button type="submit">Login</button>
+    <!-- Lets a password manager file this login under a name and offer to fill it. -->
+    <input type="text" name="username" value="imessage-bridge" autocomplete="username" hidden>
+    <input type="password" name="password" id="pw-input" placeholder="Password" autocomplete="current-password" required>
+    <button type="submit" id="pw-btn">Sign in</button>
     {error}
     <a href="#" class="alt-link" id="pk-link">Use a passkey instead</a>
   </form>
+  <div class="hint">You stay signed in on this browser for {idle_days} days after you last use it.</div>
 </div>
+<script src="/static/passkey.js?v={build}"></script>
 <script>
-const b64u = {
-  dec: s => Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0)),
-  enc: b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/[+]/g,'-').replace(/[/]/g,'_').replace(/=+$/,''),
-};
+const SIGNED_OUT = {signed_out}, PASSWORD_FIRST = {pw_first}, HAVE_PASSKEYS = {have_passkeys};
+const pkBtn = document.getElementById('pk-btn'), pkErr = document.getElementById('pk-err');
+const PK_LABEL = pkBtn.innerHTML;
+
 async function passkeyLogin() {
-  const err = document.getElementById('pk-err'); err.textContent = '';
-  try {
-    const r = await fetch('/login/passkey/options', {method:'POST'});
-    const {challenge_id, options} = await r.json();
-    options.challenge = b64u.dec(options.challenge);
-    (options.allowCredentials||[]).forEach(c => c.id = b64u.dec(c.id));
-    const cred = await navigator.credentials.get({publicKey: options});
-    const body = {challenge_id, credential: {
-      id: cred.id, rawId: b64u.enc(cred.rawId), type: cred.type,
-      response: {
-        authenticatorData: b64u.enc(cred.response.authenticatorData),
-        clientDataJSON: b64u.enc(cred.response.clientDataJSON),
-        signature: b64u.enc(cred.response.signature),
-        userHandle: cred.response.userHandle ? b64u.enc(cred.response.userHandle) : null,
-      }}};
-    const v = await fetch('/login/passkey/verify', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    if (v.ok) { window.location.href = '/'; return; }
-    err.textContent = v.status === 429 ? 'Too many attempts. Try again later.' : 'Passkey not recognised';
-  } catch (e) { if (e.name !== 'NotAllowedError') err.textContent = 'Passkey sign-in failed'; }
+  pkErr.textContent = '';
+  pkBtn.disabled = true; pkBtn.textContent = 'Waiting for your passkey…';
+  const res = await window.passkeySignIn();
+  if (res.ok) { pkBtn.textContent = 'Signed in'; window.location.replace('/'); return; }
+  pkBtn.disabled = false; pkBtn.innerHTML = PK_LABEL;
+  pkErr.textContent = res.message;
 }
 // Passkey is the default view; the password form stays hidden behind a link.
 // The server opens on the password form instead when no passkey is enrolled
@@ -952,27 +967,60 @@ function showPassword(show) {
   document.getElementById('pw-form').hidden = !show;
   if (show) document.getElementById('pw-input').focus();
 }
-document.getElementById('pk-btn').addEventListener('click', passkeyLogin);
+pkBtn.addEventListener('click', passkeyLogin);
 document.getElementById('pw-link').addEventListener('click', e => { e.preventDefault(); showPassword(true); });
 document.getElementById('pk-link').addEventListener('click', e => { e.preventDefault(); showPassword(false); });
-if (!window.PublicKeyCredential || {no_passkeys}) {
+document.getElementById('pw-form').addEventListener('submit', () => {
+  const b = document.getElementById('pw-btn'); b.disabled = true; b.textContent = 'Signing in…';
+});
+const canPasskey = window.passkeySupported() && HAVE_PASSKEYS;
+if (!canPasskey) {
   document.getElementById('pk-link').hidden = true;
   showPassword(true);
 }
+
+(async () => {
+  // Already signed in? (The session cookie is SameSite=Strict, so arriving from
+  // a link in another app or site lands here even with a perfectly good
+  // session. Asking from this page sends the cookie.) Skip the login page.
+  try {
+    const r = await fetch('/api/session', {cache: 'no-store'});
+    if (r.ok) { window.location.replace('/'); return; }
+  } catch (_) {}
+  // Otherwise go straight to the passkey prompt, so opening the app is one
+  // Touch ID / Face ID rather than a click and then a prompt. Not right after
+  // signing out, and only in a tab that's in front. Browsers that insist on a
+  // tap first refuse quietly and the button is still there.
+  if (canPasskey && !SIGNED_OUT && !PASSWORD_FIRST && document.visibilityState === 'visible' && document.hasFocus()) {
+    passkeyLogin();
+  }
+})();
 </script>
 </body></html>"""
 
 
-def _login_html(error: str = "", password_first: bool = False) -> str:
+def _fmt_days(seconds: float) -> str:
+    days = seconds / 86400
+    return f"{days:g}" if days < 10 else str(round(days))
+
+
+def _login_html(error: str = "", password_first: bool = False, signed_out: bool = False) -> str:
     """Render the login page. Passkey sign-in is the default view; the password
     form opens first only when no passkey is enrolled or `password_first` is set
-    (a password attempt just failed, so keep the user where they were)."""
+    (a password attempt just failed, so keep the user where they were).
+    `signed_out` (just logged out) stops the page prompting for a passkey on its own."""
     no_passkeys = not _passkeys()
     pw_first = password_first or no_passkeys
+    js = lambda flag: "true" if flag else "false"
     return (LOGIN_HTML
             .replace("{pk_hidden}", " hidden" if pw_first else "")
             .replace("{pw_hidden}", "" if pw_first else " hidden")
-            .replace("{no_passkeys}", "true" if no_passkeys else "false")
+            .replace("{have_passkeys}", js(not no_passkeys))
+            .replace("{pw_first}", js(password_first))
+            .replace("{signed_out}", js(signed_out))
+            .replace("{notice}", '<div class="notice">You\'re signed out.</div>' if signed_out else "")
+            .replace("{idle_days}", _fmt_days(_SESSION_IDLE))
+            .replace("{build}", _read_build_number())
             .replace("{error}", error))
 
 
@@ -1030,6 +1078,15 @@ def create_app(core: AppCore) -> FastAPI:
     status_poller = StatusPoller(core.config.imessage.db_path, manager)
     known_chats = _get_known_chat_identifiers(core.config.imessage.db_path)
     password = core.config.web.password
+    global _SESSION_TTL, _SESSION_IDLE
+    _SESSION_TTL = int(core.config.web.session_max_days * 86400)
+    _SESSION_IDLE = int(core.config.web.session_idle_days * 86400)
+
+    def _set_session_cookie(resp: Response, request: Request, token: str) -> None:
+        # The cookie outlives the idle limit on purpose: the server decides
+        # when a session is over, so activity never has to re-issue the cookie.
+        resp.set_cookie("session", token, httponly=True, samesite="strict",
+                        secure=(request.url.scheme == "https"), max_age=_SESSION_TTL)
     _notify_cfg.update({
         "enabled": core.config.web.login_notify,
         "url": core.config.web.ha_url,
@@ -1062,10 +1119,24 @@ def create_app(core: AppCore) -> FastAPI:
             await asyncio.sleep(300)
 
     @app.get("/login", response_class=HTMLResponse)
-    async def login_page():
-        if not password:
+    async def login_page(signedout: str = "", session: str | None = Cookie(default=None, alias="session")):
+        if not password or _valid_session(session):
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_login_html())
+        return HTMLResponse(_login_html(signed_out=bool(signedout)))
+
+    @app.get("/api/session")
+    async def api_session(session: str | None = Cookie(default=None, alias="session")):
+        """Is this browser signed in? 401 if not. The web client asks this to
+        tell "session over" apart from "network down" (both look the same on a
+        dropped WebSocket), and the login page asks it to skip itself."""
+        if not password:
+            return {"ok": True}
+        remaining = _session_remaining(session)
+        if remaining <= 0:
+            raise HTTPException(status_code=401)
+        expiry = _session_db.execute("SELECT expiry FROM sessions WHERE token = ?", (session,)).fetchone()[0]
+        return {"ok": True, "expires_in": int(remaining), "ends_by": int(expiry),
+                "idle_days": _fmt_days(_SESSION_IDLE)}
 
     @app.post("/login")
     async def login_submit(request: Request, response: Response, password_input: str = Form(alias="password")):
@@ -1090,8 +1161,7 @@ def create_app(core: AppCore) -> FastAPI:
             token = _create_session(client_ip)
             _notify_login(client_ip, ok=True)
             resp = RedirectResponse("/", status_code=303)
-            is_secure = request.url.scheme == "https"
-            resp.set_cookie("session", token, httponly=True, samesite="strict", secure=is_secure, max_age=_SESSION_TTL)
+            _set_session_cookie(resp, request, token)
             return resp
 
         attempts.append(now)
@@ -1103,7 +1173,7 @@ def create_app(core: AppCore) -> FastAPI:
         if session and _session_db:
             _session_db.execute("DELETE FROM sessions WHERE token = ?", (session,))
             _session_db.commit()
-        resp = RedirectResponse("/login", status_code=303)
+        resp = RedirectResponse("/login?signedout=1", status_code=303)
         resp.delete_cookie("session")
         return resp
 
@@ -1115,7 +1185,7 @@ def create_app(core: AppCore) -> FastAPI:
         n = _logout_everywhere()
         ip = request.client.host if request.client else "unknown"
         _notify("iMessage bridge: logged out everywhere", f"{n} session(s) revoked from {ip}")
-        resp = RedirectResponse("/login", status_code=303)
+        resp = RedirectResponse("/login?signedout=1", status_code=303)
         resp.delete_cookie("session")
         return resp
 
@@ -1235,7 +1305,7 @@ def create_app(core: AppCore) -> FastAPI:
         token = _create_session(client_ip)
         _notify("iMessage bridge: passkey login", f"'{key['name']}' from {client_ip} — {_geo(client_ip)}")
         resp = Response(content='{"ok": true}', media_type="application/json")
-        resp.set_cookie("session", token, httponly=True, samesite="strict", secure=(request.url.scheme == "https"), max_age=_SESSION_TTL)
+        _set_session_cookie(resp, request, token)
         return resp
 
     @app.get("/", response_class=HTMLResponse)
@@ -1345,7 +1415,12 @@ def create_app(core: AppCore) -> FastAPI:
         if password and not _valid_session(session):
             raise HTTPException(status_code=401)
         limit = min(limit, 200)
-        return get_chat_messages(core.config.imessage.db_path, chat_identifier, contact_store.contacts, limit=limit, offset=offset)
+        # to_thread: blocking sqlite against a large chat.db; on the event loop
+        # it stalls every WebSocket (pings included) while a thread loads.
+        return await asyncio.to_thread(
+            get_chat_messages, core.config.imessage.db_path, chat_identifier, contact_store.contacts,
+            limit=limit, offset=offset,
+        )
 
     @app.post("/api/chats/{chat_identifier:path}/read")
     async def mark_chat_read(chat_identifier: str, request: Request, session: str | None = Cookie(default=None, alias="session")):
@@ -1431,7 +1506,11 @@ def create_app(core: AppCore) -> FastAPI:
         session_token = ws.cookies.get("session", "")
         if password:
             if not _valid_session(session_token):
-                await ws.close(code=1008)
+                # Accept, then close with a code the page can read. Refusing
+                # the handshake instead reaches the browser as a bare 1006, so
+                # a signed-out tab would retry forever as if the network were down.
+                await ws.accept()
+                await ws.close(code=WS_AUTH_LOST, reason="Not signed in")
                 return
 
         connected = await manager.connect(ws)
@@ -1439,27 +1518,55 @@ def create_app(core: AppCore) -> FastAPI:
             return
 
         async def _ping_loop():
-            """Send application-level pings every 25s to detect zombie sockets."""
+            """Ping every 25s so both ends notice a dead socket, and drop the
+            socket once its session is over (expired, or logged out elsewhere)
+            so a signed-out tab stops receiving messages."""
             import asyncio as _aio
             while True:
                 await _aio.sleep(25)
                 try:
+                    if password and not _valid_session(session_token, touch=False):
+                        await ws.close(code=WS_AUTH_LOST, reason="Session ended")
+                        break
                     await ws.send_text(json.dumps({"type": "ping"}))
                 except Exception:
                     break
 
         import asyncio as _asyncio
 
-        async def _send_result(ws, client_id: str, chat_id: str, ok: bool, error: str = ""):
+        async def _send_result(ws, client_id: str, chat_id: str, ok: bool, error: str = "", rowid: int = 0):
             if not ok:
                 print(f"[IMSG-SEND] send to {chat_id!r} failed: {error}", flush=True)
             try:
                 await ws.send_text(json.dumps({"type": "send_result", "client_id": client_id,
-                                               "chat_identifier": chat_id, "ok": ok, "error": error}))
+                                               "chat_identifier": chat_id, "ok": ok, "error": error,
+                                               "rowid": rowid}))
             except Exception:
                 pass
 
-        async def _confirm_send(ws, client_id: str, chat_id: str, before: int, timeout: float = 60.0):
+        async def _echo_sent(ws, chat_id: str, chat_style: int, text: str, rowid: int):
+            """Show a message sent from this browser in every *other* open
+            session. The poller skips the bridge's own sends (the sending page
+            already drew them), so without this they'd only appear elsewhere
+            after a reload."""
+            others = [o for o in manager.active if o is not ws]
+            if not others or not text:
+                return
+            service, _guid = await _asyncio.to_thread(core._chat_route, chat_id, chat_style)
+            payload = json.dumps(_sanitize({
+                "type": "message", "chat_identifier": chat_id, "chat_display_name": "",
+                "chat_style": chat_style, "service": service, "sender_id": "me", "is_from_me": True,
+                "rowid": rowid, "text": text, "timestamp": datetime.now(timezone.utc).isoformat(),
+                "attachments": [],
+            }))
+            for other in others:
+                try:
+                    await other.send_text(payload)
+                except Exception:
+                    pass
+
+        async def _confirm_send(ws, client_id: str, chat_id: str, chat_style: int, text: str,
+                                before: int, timeout: float = 60.0):
             # Wait for Messages' final word on the row, not just its existence:
             # it writes the row as pending and only sets `error` when the send
             # fails, which for SMS can take ~20s.
@@ -1477,16 +1584,18 @@ def create_app(core: AppCore) -> FastAPI:
                 rowid, code, settled = found
                 if code:
                     await _send_result(ws, client_id, chat_id, False,
-                                       f"Messages reported error {code} (message {rowid})")
+                                       f"Messages reported error {code} (message {rowid})", rowid=rowid)
                     return
                 if settled:
-                    await _send_result(ws, client_id, chat_id, True)
+                    await _send_result(ws, client_id, chat_id, True, rowid=rowid)
+                    await _echo_sent(ws, chat_id, chat_style, text, rowid)
                     return
             if found:
                 # Still pending; don't call it failed. The status poller will
                 # flip the bubble to Not Delivered if Messages errors later.
                 print(f"[IMSG-SEND] message {found[0]} to {chat_id!r} still pending after {timeout:.0f}s", flush=True)
-                await _send_result(ws, client_id, chat_id, True)
+                await _send_result(ws, client_id, chat_id, True, rowid=found[0])
+                await _echo_sent(ws, chat_id, chat_style, text, found[0])
                 return
             await _send_result(ws, client_id, chat_id, False,
                                "Messages accepted the send but never recorded it. Check that Messages on the "
@@ -1502,7 +1611,15 @@ def create_app(core: AppCore) -> FastAPI:
                 if msg.get("type") == "pong":
                     _touch_session(session_token)  # client is alive → keeps idle timer fresh
                     continue
+                if msg.get("type") == "ping":
+                    # The page asking "are you still there?" (after waking, or
+                    # coming back to the tab) so it needn't wait for our next ping.
+                    await ws.send_text('{"type": "pong"}')
+                    continue
                 if msg.get("type") == "send":
+                    if password and not _valid_session(session_token):
+                        await ws.close(code=WS_AUTH_LOST, reason="Session ended")
+                        break
                     chat_id = msg.get("chat_identifier", "")
                     chat_style = msg.get("chat_style", 45)
                     text = msg.get("text", "")
@@ -1535,15 +1652,16 @@ def create_app(core: AppCore) -> FastAPI:
                         ok, err = True, ""
                     if not (f_ok and ok):
                         await _send_result(ws, client_id, chat_id, False, "; ".join(e for e in (f_err, err) if e))
-                    elif text:
+                    elif text or file_path:
                         # Messages accepting the AppleScript isn't proof it sent:
                         # confirm the row lands in chat.db without an error.
-                        _asyncio.create_task(_confirm_send(ws, client_id, chat_id, before))
-        except WebSocketDisconnect:
-            manager.disconnect(ws)
-        except Exception:
-            manager.disconnect(ws)
+                        # (Attachment-only sends too: with no verdict at all the
+                        # page times out and marks a delivered photo as failed.)
+                        _asyncio.create_task(_confirm_send(ws, client_id, chat_id, chat_style, text, before))
+        except Exception:      # includes WebSocketDisconnect
+            pass
         finally:
+            manager.disconnect(ws)
             ping_task.cancel()
 
     return app

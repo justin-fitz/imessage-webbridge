@@ -17,3 +17,5 @@ web:
   max_message_length: 10000       # max characters per message
   login_rate_limit: 5             # max failed login attempts per window
   login_rate_window: 300          # rate limit window in seconds
+  session_idle_days: 30           # signed out after this long without opening the app
+  session_max_days: 90            # signed out this long after sign-in, regardless

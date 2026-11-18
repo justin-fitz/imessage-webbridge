@@ -95,8 +95,8 @@ Access via the **Preferences** link at the bottom of the sidebar:
 Preferences are saved in your browser's localStorage and persist across sessions.
 
 ### Security
-- **Cookie-based authentication** with configurable password and 7-day sessions
-- **WebSocket authentication** via session token
+- **Cookie-based authentication** with a configurable password and passkeys. A browser stays signed in for 30 days after it was last used, 90 days at most (`session_idle_days` / `session_max_days`)
+- **WebSocket authentication** via the session cookie; open sockets are dropped when their session ends or you log out everywhere
 - **JXA message sending** — uses JavaScript for Automation with `json.dumps()` parameterization to prevent command injection
 - **Input validation** — messages only sent to known conversations in chat.db
 - **Chat identifier validation** — regex allowlist blocks malformed identifiers

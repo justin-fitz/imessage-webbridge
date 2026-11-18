@@ -627,7 +627,66 @@ class TestAppEndpoints:
         self._login(client)
         resp = client.get("/logout", follow_redirects=False)
         assert resp.status_code == 303
-        assert resp.headers["location"] == "/login"
+        # Lands on a login page that won't immediately prompt for a passkey again.
+        assert resp.headers["location"] == "/login?signedout=1"
+        assert "You're signed out" in client.get("/login?signedout=1").text
+
+    def test_login_page_skipped_when_signed_in(self, tmp_path):
+        client, _ = self._make_client(tmp_path)
+        self._login(client)
+        resp = client.get("/login", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/"
+
+    def test_api_session(self, tmp_path):
+        """The page's "am I still signed in?" probe: 401 without a session."""
+        client, _ = self._make_client(tmp_path)
+        assert client.get("/api/session").status_code == 401
+        self._login(client)
+        body = client.get("/api/session").json()
+        assert body["ok"] is True
+        assert body["idle_days"] == "30"
+        # Bounded by the idle limit (30 days), not the absolute one (90).
+        assert 29 * 86400 < body["expires_in"] <= 30 * 86400
+        assert body["ends_by"] > time.time() + 89 * 86400
+
+    def test_session_cookie_outlives_idle_limit(self, tmp_path):
+        client, _ = self._make_client(tmp_path)
+        resp = client.post("/login", data={"password": "testpass"}, follow_redirects=False)
+        cookie = resp.headers["set-cookie"]
+        assert f"Max-Age={90 * 86400}" in cookie
+        assert "HttpOnly" in cookie and "SameSite=strict" in cookie
+
+    def test_session_ends_when_idle_or_past_expiry(self, tmp_path):
+        import web_server
+        client, _ = self._make_client(tmp_path)
+        token = self._login(client)
+        db = web_server._session_db
+        # Used yesterday: still signed in.
+        db.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (time.time() - 86400, token))
+        assert client.get("/api/session").status_code == 200
+        # Untouched for longer than the idle limit: signed out, row removed.
+        db.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (time.time() - 31 * 86400, token))
+        assert client.get("/api/session").status_code == 401
+        assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+        # In constant use but past the absolute limit: signed out too.
+        token = self._login(client)
+        db.execute("UPDATE sessions SET expiry = ? WHERE token = ?", (time.time() - 1, token))
+        assert client.get("/api/session").status_code == 401
+
+    def test_session_limits_come_from_config(self, tmp_path):
+        import web_server
+        from web_server import create_app
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        config = Config(
+            imessage=IMessageConfig(db_path=db_path),
+            app=AppConfig(state_db=str(tmp_path / "state.db"), temp_dir=str(tmp_path / "tmp")),
+            web=WebConfig(password="testpass", session_idle_days=0.5, session_max_days=2),
+        )
+        with patch("app_core.IMessageReader"):
+            core = AppCore(config)
+        create_app(core)   # every create_app sets both, so nothing leaks into other tests
+        assert (web_server._SESSION_IDLE, web_server._SESSION_TTL) == (43200, 172800)
 
     def test_unauthenticated_redirect(self, tmp_path):
         client, _ = self._make_client(tmp_path)
@@ -1088,7 +1147,83 @@ class TestWebSocketEndpoint:
                 if data.get("type") == "send_result":
                     break
         assert data == {"type": "send_result", "client_id": "c123", "chat_identifier": "+15551234567",
-                        "ok": False, "error": "Messages got an error"}
+                        "ok": False, "error": "Messages got an error", "rowid": 0}
+
+    def test_ws_signed_out_gets_a_readable_close_code(self, tmp_path):
+        """No session → the socket is accepted then closed with 4401, so the
+        page can tell "sign in again" from "network down" (a refused handshake
+        reaches a browser as a bare 1006)."""
+        from starlette.websockets import WebSocketDisconnect
+        client, _ = self._make_client(tmp_path)
+        client.cookies.set("session", "invalid")
+        with client.websocket_connect("/ws") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_text()
+        assert exc.value.code == 4401
+
+    def test_ws_client_ping_answered(self, tmp_path):
+        client, _ = self._make_client(tmp_path)
+        client.cookies.set("session", self._get_session(client))
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text('{"type": "ping"}')
+            assert json.loads(ws.receive_text()) == {"type": "pong"}
+
+    def test_ws_send_refused_after_logout_everywhere(self, tmp_path):
+        """A socket opened before "Log out everywhere" can't keep sending."""
+        from starlette.websockets import WebSocketDisconnect
+        from web_server import _logout_everywhere
+        client, core = self._make_client(tmp_path)
+        client.cookies.set("session", self._get_session(client))
+        core.sender = MagicMock()
+        with client.websocket_connect("/ws") as ws:
+            _logout_everywhere()
+            ws.send_text(json.dumps({"type": "send", "chat_identifier": "+15551234567",
+                                     "chat_style": 45, "text": "should not go"}))
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_text()
+        assert exc.value.code == 4401
+        core.sender.send_text.assert_not_called()
+
+    def test_ws_send_confirmed_with_rowid_and_echoed_to_other_sessions(self, tmp_path):
+        """A confirmed send reports its chat.db row to the sender, and shows up
+        in every other open session (the poller skips the bridge's own sends)."""
+        client, core = self._make_client(tmp_path)
+        client.cookies.set("session", self._get_session(client))
+        core.sender = MagicMock()
+        core.sender.send_text.return_value = True
+        core.find_sent_row = MagicMock(return_value=(42, 0, True))
+        # Another signed-in browser. (A second TestClient socket would live on
+        # its own event loop, which a real server never has.)
+        other = AsyncMock()
+        core._handlers[0].manager.active.append(other)
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "send", "chat_identifier": "+15551234567", "chat_style": 45,
+                                     "text": "hi there", "client_id": "c9"}))
+            assert json.loads(ws.receive_text()) == {
+                "type": "send_result", "client_id": "c9", "chat_identifier": "+15551234567",
+                "ok": True, "error": "", "rowid": 42}
+            ws.send_text('{"type": "ping"}')      # round trip, so the echo has gone out
+            ws.receive_text()
+        echo = json.loads(other.send_text.call_args[0][0])
+        assert (echo["type"], echo["is_from_me"], echo["rowid"], echo["text"]) == ("message", True, 42, "hi there")
+
+    def test_ws_attachment_only_send_gets_a_verdict(self, tmp_path):
+        """A photo with no caption is confirmed too; with no verdict the page
+        timed out and marked a delivered photo as failed."""
+        client, core = self._make_client(tmp_path)
+        client.cookies.set("session", self._get_session(client))
+        tmp_dir = core.config.app.temp_dir
+        os.makedirs(tmp_dir, exist_ok=True)
+        path = os.path.join(os.path.abspath(tmp_dir), "pic.png")
+        open(path, "wb").write(b"x")
+        core.sender = MagicMock()
+        core.sender.send_file.return_value = True
+        core.find_sent_row = MagicMock(return_value=(7, 0, True))
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "send", "chat_identifier": "+15551234567", "chat_style": 45,
+                                     "file_path": path, "client_id": "c1"}))
+            data = json.loads(ws.receive_text())
+        assert (data["type"], data["ok"], data["rowid"]) == ("send_result", True, 7)
 
     def test_ws_unknown_chat_ignored(self, tmp_path):
         """Message to unknown chat is ignored."""

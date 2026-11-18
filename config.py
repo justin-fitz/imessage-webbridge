@@ -14,6 +14,11 @@ class WebConfig:
     max_message_length: int = 10000
     login_rate_limit: int = 5
     login_rate_window: int = 300
+    # How long a login lasts. A session ends after `session_idle_days` without
+    # the app being opened, or `session_max_days` after sign-in, whichever
+    # comes first.
+    session_idle_days: float = 30
+    session_max_days: float = 90
     # Security notifications (login, lockout, send-unlock) via Home Assistant → phone
     login_notify: bool = True
     ha_url: str = "http://10.0.10.202:8123"
@@ -71,6 +76,8 @@ def load_config(path: str) -> Config:
         max_message_length=w.get("max_message_length", 10000),
         login_rate_limit=w.get("login_rate_limit", 5),
         login_rate_window=w.get("login_rate_window", 300),
+        session_idle_days=float(w.get("session_idle_days", 30)),
+        session_max_days=float(w.get("session_max_days", 90)),
         login_notify=w.get("login_notify", True),
         ha_url=w.get("ha_url", "http://10.0.10.202:8123"),
         ha_token_file=w.get("ha_token_file", "~/.config/ha/token"),

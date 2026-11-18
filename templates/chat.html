@@ -128,13 +128,87 @@
     height: 100vh;
   }
 
-  #chat-header {
-    padding: 16px;
+  #chat-header-bar {
+    display: flex;
+    align-items: center;
     border-bottom: 1px solid #333;
-    font-size: 16px;
-    font-weight: 600;
     background: #222;
   }
+  #chat-header {
+    flex: 1;
+    min-width: 0;
+    padding: 16px;
+    font-size: 16px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Phone only: the way back from a conversation to the list. */
+  #back-btn {
+    display: none;
+    background: none;
+    border: none;
+    color: #0b84fe;
+    font-size: 28px;
+    line-height: 1;
+    padding: 8px 4px 10px 14px;
+    cursor: pointer;
+  }
+  /* Connection trouble, shown above the conversation (the sidebar's status
+     line isn't visible on a phone while a chat is open). */
+  #conn-banner {
+    display: none;
+    padding: 6px 12px;
+    font-size: 12px;
+    text-align: center;
+    color: #ffd60a;
+    background: #3a3000;
+    flex-shrink: 0;
+  }
+  #conn-banner.show { display: block; }
+  #compose-note {
+    display: none;
+    padding: 6px 16px 0;
+    font-size: 12px;
+    color: #ff9f0a;
+    flex-shrink: 0;
+  }
+  .msgs-note { color: #777; text-align: center; padding: 20px; font-size: 13px; }
+  .msgs-note a { color: #0b84fe; }
+  #reauth-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+  }
+  #reauth-overlay.open { display: flex; }
+  #reauth-overlay [hidden] { display: none !important; }
+  #reauth-panel {
+    background: #222;
+    border-radius: 12px;
+    padding: 24px;
+    width: 300px;
+    max-width: 90vw;
+    text-align: center;
+  }
+  #reauth-panel h3 { margin: 0 0 8px; font-size: 17px; }
+  #reauth-panel p { margin: 0 0 16px; font-size: 13px; color: #9a9a9e; line-height: 1.4; }
+  #reauth-panel input[type=password] {
+    width: 100%; padding: 10px 14px; border: 1px solid #444; border-radius: 8px;
+    background: #2a2a2a; color: #e0e0e0; font-size: 14px; box-sizing: border-box; margin-bottom: 10px;
+  }
+  #reauth-panel button {
+    width: 100%; padding: 10px; background: #0b84fe; color: #fff; border: none;
+    border-radius: 8px; font-size: 14px; cursor: pointer;
+  }
+  #reauth-panel button:disabled { opacity: .6; cursor: default; }
+  #reauth-panel a { display: inline-block; margin-top: 14px; color: #8e8e93; font-size: 12px; }
+  #reauth-err { color: #ff453a; font-size: 12px; margin-top: 10px; min-height: 14px; }
+  #session-note { font-size: 11px; color: #777; margin-top: 10px; text-align: center; line-height: 1.4; }
 
   #messages {
     flex: 1;
@@ -670,6 +744,8 @@
     #main { display: none; }
     body.chat-open #sidebar { display: none; }
     body.chat-open #main { display: flex; }
+    #back-btn { display: block; }
+    #chat-header { padding-left: 6px; }
   }
 </style>
 </head>
@@ -743,11 +819,30 @@
     <form method="POST" action="/logout-all" onsubmit="return confirm('Log out every device and browser that is signed in to the bridge?')" style="margin:0">
       <button type="submit" style="margin-top:6px;width:100%;padding:8px;background:#333;color:#ff3b30;border:1px solid #ff3b30;border-radius:8px;font-size:13px;cursor:pointer">Log out everywhere</button>
     </form>
+    <div id="session-note"></div>
+  </div>
+</div>
+
+<div id="reauth-overlay">
+  <div id="reauth-panel">
+    <h3>Sign in again</h3>
+    <p>Your session ended. Nothing here is lost: sign in and you're back where you were.</p>
+    <div id="reauth-pk">
+      <button type="button" id="reauth-pk-btn">&#128273; Sign in with passkey</button>
+      <div><a href="#" id="reauth-use-pw">Use password instead</a></div>
+    </div>
+    <form id="reauth-pw" hidden>
+      <input type="text" name="username" value="imessage-bridge" autocomplete="username" hidden>
+      <input type="password" name="password" id="reauth-pw-input" placeholder="Password" autocomplete="current-password" required>
+      <button type="submit" id="reauth-pw-btn">Sign in</button>
+    </form>
+    <div id="reauth-err"></div>
   </div>
 </div>
 
 <div id="main">
-  <div id="chat-header">Select a conversation</div>
+  <div id="chat-header-bar"><button id="back-btn" title="Back to conversations" aria-label="Back to conversations">&#8249;</button><div id="chat-header">Select a conversation</div></div>
+  <div id="conn-banner" role="status"></div>
   <div id="new-msg-header" style="display:none;position:relative">
     <label>To:</label>
     <div id="new-msg-to-area">
@@ -758,6 +853,7 @@
   <div id="empty-state">Select a conversation to start</div>
   <div id="messages" style="display:none"></div>
   <div id="focus-banner" style="display:none"></div>
+  <div id="compose-note" role="status"></div>
   <div id="compose" style="display:none">
     <div id="paste-preview" style="display:none">
       <img id="paste-preview-img">
@@ -768,6 +864,7 @@
   </div>
 </div>
 
+<script src="/static/passkey.js?v={{ build_number }}"></script>
 <script>
 const state = {
   chatId: null,
@@ -836,213 +933,335 @@ document.getElementById('add-passkey-btn').addEventListener('click', addPasskey)
 if (!window.PublicKeyCredential) document.getElementById('passkey-row').style.display = 'none';
 loadPasskeys();
 
-// --- WebSocket ---
-let _wsReconnectTimer = null;
-let _wsConnecting = false;
-let _wsReconnectAttempts = 0;
+// --- Connection ---
+// One place decides what the connection is doing, so the status line, the
+// reconnect loop and the sign-in prompt can't disagree. The rules:
+//   * A dropped socket is retried forever with a short capped backoff. It never
+//     gives up and never navigates away; only a confirmed "signed out" stops it.
+//   * "Signed out" is asked of the server (/api/session, or close code 4401),
+//     never guessed from how many retries failed.
+//   * Every time a socket opens after the first, the page re-syncs: anything
+//     that arrived while it was away shows up without a reload.
+const WS_AUTH_LOST = 4401, WS_TOO_MANY = 4429;
+const PAGE_LOADED_AT = Date.now();
+const conn = {
+  attempts: 0,      // consecutive failed reconnects (drives the backoff)
+  timer: null,      // pending reconnect
+  lastRx: 0,        // when anything last arrived on the socket
+  everOpen: false,  // a socket has been open before: the next open is a reconnect
+  authLost: false,  // session over: wait for sign-in instead of retrying
+  probe: null,      // pending "are you still there?" timeout
+  bannerTimer: null,
+};
 
 function setStatus(connected, text) {
   document.getElementById('status-dot').className = 'dot ' + (connected ? 'connected' : 'disconnected');
   document.getElementById('status-text').textContent = text;
+  // The sidebar (and its status line) is hidden on a phone while a chat is
+  // open, so trouble also shows as a strip above the conversation. Delayed a
+  // moment so a blip that heals itself never flashes on screen.
+  const banner = document.getElementById('conn-banner');
+  clearTimeout(conn.bannerTimer);
+  if (connected) {
+    banner.classList.remove('show');
+  } else {
+    banner.textContent = text;
+    if (!banner.classList.contains('show')) {
+      conn.bannerTimer = setTimeout(() => banner.classList.add('show'), 1500);
+    }
+  }
 }
 
-// Redirect to login if the session has expired / server restarted and dropped our cookie.
-function redirectToLogin() {
-  setStatus(false, 'Session expired — redirecting to login…');
-  setTimeout(() => { window.location.href = '/login'; }, 1200);
+// fetch + JSON for the bridge's own API. Returns null on any failure. A 401
+// means the session is over, which is handled in exactly one place.
+async function api(url, opts) {
+  let r;
+  try { r = await fetch(url, opts); } catch (_) { return null; }
+  if (r.status === 401) { sessionLost(); return null; }
+  if (!r.ok) return null;
+  try { return await r.json(); } catch (_) { return null; }
 }
 
-// Probe the server — if we get a 401/403 redirect to login; otherwise reconnect.
-async function checkSessionThenReconnect() {
+// 'ok' | 'expired' | 'unreachable'. A dropped socket looks the same whether
+// the network died, the bridge restarted or the session ended; this tells
+// them apart.
+async function sessionState() {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 8000);
   try {
-    const r = await fetch('/api/version');
-    if (r.status === 401 || r.status === 403 || r.redirected && r.url.includes('/login')) {
-      redirectToLogin();
-      return;
-    }
+    const r = await fetch('/api/session', { cache: 'no-store', signal: ctl.signal });
+    if (r.status === 401) return 'expired';
+    return r.ok ? 'ok' : 'unreachable';   // e.g. 502 from the proxy while the bridge restarts
   } catch (_) {
-    // Network down — keep trying
+    return 'unreachable';
+  } finally {
+    clearTimeout(t);
   }
-  connectWS();
 }
 
-function scheduleReconnect(delayMs) {
-  if (_wsReconnectTimer) return;  // already scheduled
-  _wsReconnectAttempts++;
-  // After ~2 minutes of failures, check session health before retrying.
-  // Beyond 20 attempts (≈5 min) redirect rather than loop forever.
-  if (_wsReconnectAttempts > 20) {
-    redirectToLogin();
-    return;
-  }
-  const delay = Math.min(delayMs * Math.pow(1.5, Math.min(_wsReconnectAttempts - 1, 6)), 30000);
-  _wsReconnectTimer = setTimeout(() => {
-    _wsReconnectTimer = null;
-    if (_wsReconnectAttempts > 3) {
-      checkSessionThenReconnect();
-    } else {
-      connectWS();
-    }
+function closeSocket() {
+  const ws = state.ws;
+  clearTimeout(conn.probe); conn.probe = null;
+  if (!ws) return;
+  ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
+  try { ws.close(); } catch (_) {}
+  state.ws = null;
+}
+
+function offlineText() {
+  return navigator.onLine === false ? 'Offline. Waiting for a network…' : "Can't reach the bridge. Retrying…";
+}
+
+function scheduleReconnect(text) {
+  if (conn.authLost || conn.timer) return;
+  // Quick at first (a bridge restart takes ~5-10s and should heal by itself
+  // within a few seconds of coming back), easing off to every 15s if it's
+  // been down for about a minute.
+  const base = conn.attempts < 12 ? Math.min(1000 * Math.pow(1.6, conn.attempts), 5000) : 15000;
+  const delay = base * (0.75 + Math.random() * 0.5);
+  conn.attempts++;
+  setStatus(false, text || (navigator.onLine === false ? offlineText() : 'Reconnecting…'));
+  conn.timer = setTimeout(async () => {
+    conn.timer = null;
+    const s = await sessionState();
+    if (conn.authLost || conn.timer || state.ws) return;   // something else moved on meanwhile
+    if (s === 'expired') { sessionLost(); return; }
+    if (s === 'unreachable') { scheduleReconnect(offlineText()); return; }
+    connectWS();
   }, delay);
 }
 
 function connectWS() {
-  // Don't stack multiple in-flight connects
-  if (_wsConnecting) return;
-  if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) return;
+  if (conn.authLost) return;
+  if (state.ws && state.ws.readyState <= WebSocket.OPEN) return;   // already connecting or open
+  clearTimeout(conn.timer); conn.timer = null;
 
-  _wsConnecting = true;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
   state.ws = ws;
+  // A handshake on a half-dead network can hang for minutes without failing.
+  const openTimeout = setTimeout(() => { if (ws.readyState === WebSocket.CONNECTING) ws.close(); }, 10000);
 
   ws.onopen = () => {
-    _wsConnecting = false;
-    _wsReconnectAttempts = 0;  // reset on successful connect
+    clearTimeout(openTimeout);
+    conn.attempts = 0;
+    conn.lastRx = Date.now();
     setStatus(true, 'Connected');
-    state.lastPong = Date.now();
-    // Every reconnect could mean the server restarted with a new build — check immediately.
+    // Catch up on whatever happened while there was no socket. (Also on a
+    // first connect that took a while: the page's own data is stale by then.)
+    if (conn.everOpen || Date.now() - PAGE_LOADED_AT > 5000) resync();
+    conn.everOpen = true;
+    // Every reconnect could mean the server restarted with a new build.
     checkForUpdate();
   };
 
   ws.onclose = (event) => {
-    _wsConnecting = false;
-    if (state.ws === ws) state.ws = null;
-    // Auth failure (server rejected the session cookie on WS upgrade)
-    if (event.code === 1008) {
-      redirectToLogin();
-      return;
-    }
-    setStatus(false, 'Disconnected — reconnecting…');
-    scheduleReconnect(2000);
+    clearTimeout(openTimeout);
+    if (state.ws !== ws) return;   // superseded by a newer socket
+    state.ws = null;
+    clearTimeout(conn.probe); conn.probe = null;
+    if (event.code === WS_AUTH_LOST) { sessionLost(); return; }
+    scheduleReconnect(event.code === WS_TOO_MANY ? 'Too many open sessions. Retrying…' : null);
   };
 
-  ws.onerror = () => {
-    // onclose always fires after onerror; let it handle reconnect
-    _wsConnecting = false;
-  };
+  ws.onerror = () => { /* onclose always follows and does the work */ };
 
   ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
+    conn.lastRx = Date.now();
+    if (conn.probe) { clearTimeout(conn.probe); conn.probe = null; }
+    let data;
+    try { data = JSON.parse(event.data); } catch (_) { return; }
     if (data.type === 'ping') {
-      // Server health-check — reply so server knows we're alive
+      // Server health-check — reply so the server knows we're alive (this is
+      // also what keeps the session's idle timer fresh).
       ws.send(JSON.stringify({ type: 'pong' }));
-      state.lastPong = Date.now();
       return;
     }
+    if (data.type === 'pong') return;   // answer to our own probe; lastRx is the point
+    handleServerEvent(data);
+  };
+}
 
-    if (data.type === 'message') {
-      if (data.chat_identifier === state.chatId) {
-        if (!data.is_from_me) {
-          appendMessage(data);
-          // User is actively viewing this chat — update the server-side read
-          // horizon so the badge stays dismissed after a page reload.
-          if (data.rowid) {
-            fetch(`/api/chats/${encodeURIComponent(state.chatId)}/read`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ max_rowid: data.rowid }),
-            }).catch(() => {});
-          }
-        }
-        showLastStatus();
-        if (!data.is_from_me && document.hidden) {
-          const senderName = (data.chat_style == 43 && data.chat_display_name) ? `${data.sender_id} (${data.chat_display_name})` : (data.sender_id || data.chat_display_name || data.chat_identifier);
-          showNotification(senderName, data.text);
-          startFlash(`New message from ${senderName}`);
-        }
-      } else if (!data.is_from_me) {
-        const cid = data.chat_identifier;
-        state.unread[cid] = (state.unread[cid] || 0) + 1;
-        updateUnreadBadge(cid);
-        updateTitle();
-
-        // Notifications for messages not in current view
-        const senderName = (data.chat_style == 43 && data.chat_display_name) ? `${data.sender_id} (${data.chat_display_name})` : (data.sender_id || data.chat_display_name || cid);
+function handleServerEvent(data) {
+  if (data.type === 'message') {
+    if (data.chat_identifier === state.chatId) {
+      const shown = data.rowid && document.querySelector(`#messages .msg[data-rowid="${data.rowid}"]`);
+      if (shown) {
+        // Already on screen (a re-sync and the live event crossed paths).
+      } else if (data.is_from_me) {
+        // Sent by me. Either it's the bubble this page drew when I hit Send,
+        // or I sent it from my phone / another browser and it's new here.
+        if (!adoptPending(data)) appendMessage(data);
+      } else {
+        appendMessage(data);
+        // User is actively viewing this chat — update the server-side read
+        // horizon so the badge stays dismissed after a page reload.
+        markRead(state.chatId, data.rowid);
+      }
+      showLastStatus();
+      if (!data.is_from_me && document.hidden) {
+        const senderName = (data.chat_style == 43 && data.chat_display_name) ? `${data.sender_id} (${data.chat_display_name})` : (data.sender_id || data.chat_display_name || data.chat_identifier);
         showNotification(senderName, data.text);
         startFlash(`New message from ${senderName}`);
       }
-      updateSidebarPreview(data);
-    } else if (data.type === 'status_update') {
-      if (data.chat_identifier === state.chatId) {
-        updateLastSentStatus(data.status);
-        if (typeof data.delivered_quietly === 'boolean') {
-          const sent = document.querySelectorAll('#messages .msg.from-me');
-          if (sent.length) sent[sent.length - 1].dataset.quiet = data.delivered_quietly ? '1' : '0';
-        }
-        updateFocusBanner();
-      }
-    } else if (data.type === 'send_result') {
-      settleSend(data.client_id, data.ok, data.error);
-    } else if (data.type === 'read_sync') {
-      // iPhone/Messages.app marked this chat read — clear our in-memory badge.
-      // Server already cleared the webapp_read_horizon row in _check_read_sync.
-      state.unread[data.chat_identifier] = 0;
-      updateUnreadBadge(data.chat_identifier);
+    } else if (!data.is_from_me) {
+      const cid = data.chat_identifier;
+      state.unread[cid] = (state.unread[cid] || 0) + 1;
+      updateUnreadBadge(cid);
       updateTitle();
+
+      // Notifications for messages not in current view
+      const senderName = (data.chat_style == 43 && data.chat_display_name) ? `${data.sender_id} (${data.chat_display_name})` : (data.sender_id || data.chat_display_name || cid);
+      showNotification(senderName, data.text);
+      startFlash(`New message from ${senderName}`);
     }
-  };
-}
-
-function forceReconnect(reason) {
-  if (state.ws) {
-    state.ws.onclose = null;  // suppress scheduled reconnect — we'll do it manually
-    state.ws.close();
-    state.ws = null;
+    updateSidebarPreview(data);
+    updateUnreadBadge(data.chat_identifier);   // a brand-new thread only has a sidebar row from here on
+  } else if (data.type === 'status_update') {
+    if (data.chat_identifier === state.chatId) {
+      updateLastSentStatus(data.status);
+      if (typeof data.delivered_quietly === 'boolean') {
+        const sent = document.querySelectorAll('#messages .msg.from-me');
+        if (sent.length) sent[sent.length - 1].dataset.quiet = data.delivered_quietly ? '1' : '0';
+      }
+      updateFocusBanner();
+    }
+  } else if (data.type === 'send_result') {
+    settleSend(data.client_id, data.ok, data.error, data.rowid);
+  } else if (data.type === 'read_sync') {
+    // iPhone/Messages.app marked this chat read — clear our in-memory badge.
+    // Server already cleared the webapp_read_horizon row in _check_read_sync.
+    state.unread[data.chat_identifier] = 0;
+    updateUnreadBadge(data.chat_identifier);
+    updateTitle();
   }
-  _wsConnecting = false;
-  if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
-  setStatus(false, reason || 'Reconnecting...');
-  scheduleReconnect(500);
 }
 
-// Detect wake from sleep: interval drift approach (5s tick, >10s drift = woke up)
-let lastHeartbeat = Date.now();
+// Drop whatever socket there is and connect again right now, without backoff.
+// For moments when we know better than the timer: the network just came back,
+// the laptop just woke, the server stopped answering.
+function reconnectNow(text) {
+  if (conn.authLost) return;
+  closeSocket();
+  clearTimeout(conn.timer); conn.timer = null;
+  conn.attempts = 0;
+  setStatus(false, text || 'Reconnecting…');
+  connectWS();
+}
+
+// "Is this socket really alive?" A socket can say OPEN for minutes after the
+// network under it is gone (sleep, Wi-Fi change, train tunnel). Ask the server
+// and give it 4 seconds, rather than waiting out the next scheduled ping.
+function checkAlive() {
+  if (conn.authLost) return;
+  const ws = state.ws;
+  if (!ws || ws.readyState > WebSocket.OPEN) { reconnectNow(); return; }
+  if (ws.readyState !== WebSocket.OPEN || conn.probe) return;   // connecting, or already asked
+  try { ws.send('{"type":"ping"}'); } catch (_) { reconnectNow(); return; }
+  conn.probe = setTimeout(() => { conn.probe = null; reconnectNow(); }, 4000);
+}
+
+// Safety net. The server pings every 25s, so 45s of silence on an "open"
+// socket means it is dead. (Checked against the clock, not by counting timer
+// ticks: browsers slow timers in background tabs, and treating a late tick as
+// "the machine slept" tore down healthy connections once a minute.)
 setInterval(() => {
-  const now = Date.now();
-  if (now - lastHeartbeat > 10000) {
-    // Machine woke from sleep — socket is definitely stale
-    forceReconnect('Reconnecting after sleep...');
-    if (state.chatId) reloadCurrentChat();
-    fetch('/api/chats').then(r => r.ok ? r.json() : null).then(chats => {
+  if (conn.authLost) return;
+  const ws = state.ws;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    if (Date.now() - conn.lastRx > 45000) reconnectNow('Connection went quiet. Reconnecting…');
+  } else if (!ws && !conn.timer) {
+    scheduleReconnect();
+  }
+}, 10000);
+
+window.addEventListener('online', checkAlive);
+window.addEventListener('offline', () => { if (!state.ws || state.ws.readyState !== WebSocket.OPEN) setStatus(false, offlineText()); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkAlive(); });
+window.addEventListener('pageshow', (e) => { if (e.persisted) checkAlive(); });   // restored from the back/forward cache
+
+// --- Re-sync ---
+// Bring the sidebar and the open conversation up to date with the server
+// without wiping what's on screen (scroll position, drafts, failed bubbles).
+let _resyncing = null;
+function resync() {
+  if (!_resyncing) {
+    _resyncing = (async () => {
+      const [chats] = await Promise.all([api('/api/chats'), syncOpenChat()]);
       if (chats) refreshChatList(chats);
-    });
+    })().finally(() => { _resyncing = null; });
   }
-  lastHeartbeat = now;
-}, 5000);
+  return _resyncing;
+}
 
-// Periodic session health check (every 90s): if WS appears connected but the HTTP
-// session is expired (server restarted, cookie invalidated), redirect to login.
-setInterval(async () => {
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-  // Also catch zombie sockets: WS says OPEN but server pings stopped
-  if (state.lastPong && Date.now() - state.lastPong > 75000) {
-    forceReconnect('Connection stale — reconnecting…');
-    return;
+// --- Signed out ---
+// The session ended while the page was open. Ask for a sign-in right here
+// instead of bouncing to the login page, so drafts and scroll position survive.
+function sessionLost() {
+  if (conn.authLost) return;
+  conn.authLost = true;
+  clearTimeout(conn.timer); conn.timer = null;
+  closeSocket();
+  setStatus(false, 'Signed out');
+  const overlay = document.getElementById('reauth-overlay');
+  const usePasskey = window.passkeySupported && window.passkeySupported() && state.passkeyCount > 0;
+  document.getElementById('reauth-pk').hidden = !usePasskey;
+  document.getElementById('reauth-pw').hidden = usePasskey;
+  document.getElementById('reauth-err').textContent = '';
+  overlay.classList.add('open');
+  if (usePasskey) {
+    // One prompt without a click, if this tab is the one being looked at.
+    if (document.visibilityState === 'visible' && document.hasFocus()) reauthPasskey();
+  } else {
+    document.getElementById('reauth-pw-input').focus();
   }
+}
+
+function signedInAgain() {
+  conn.authLost = false;
+  document.getElementById('reauth-overlay').classList.remove('open');
+  document.getElementById('reauth-pw-input').value = '';
+  conn.everOpen = true;   // make the next open re-sync
+  reconnectNow('Connecting…');
+  loadPasskeys();
+}
+
+async function reauthPasskey() {
+  const btn = document.getElementById('reauth-pk-btn'), err = document.getElementById('reauth-err');
+  const label = btn.innerHTML;
+  err.textContent = '';
+  btn.disabled = true; btn.textContent = 'Waiting for your passkey…';
+  const res = await window.passkeySignIn();
+  btn.disabled = false; btn.innerHTML = label;
+  if (res.ok) signedInAgain(); else err.textContent = res.message;
+}
+
+async function reauthPassword(e) {
+  e.preventDefault();
+  const btn = document.getElementById('reauth-pw-btn'), err = document.getElementById('reauth-err');
+  err.textContent = '';
+  btn.disabled = true;
   try {
-    const r = await fetch('/api/version');
-    if (r.status === 401 || r.status === 403 || (r.redirected && r.url.includes('/login'))) {
-      redirectToLogin();
-    }
-  } catch (_) { /* network blip, ignore */ }
-}, 90000);
-
-// Reconnect immediately when the network comes back online
-window.addEventListener('online', () => forceReconnect('Back online — reconnecting...'));
-
-// Reconnect when the tab becomes visible (covers sleep + network change on mobile/laptops)
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    const ws = state.ws;
-    const dead = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
-    // Also reconnect if server pings stopped (zombie socket: readyState=OPEN but TCP is dead)
-    const stale = ws && ws.readyState === WebSocket.OPEN && (Date.now() - (state.lastPong || 0)) > 60000;
-    if (dead || stale) {
-      forceReconnect('Reconnecting...');
-      if (state.chatId) reloadCurrentChat();
-    }
+    // redirect:'manual' — success answers with a redirect to "/", and there's
+    // no point loading the whole app again behind this dialog just to follow it.
+    const r = await fetch('/login', { method: 'POST', body: new FormData(e.target), redirect: 'manual' });
+    if (r.type === 'opaqueredirect' || r.ok) signedInAgain();
+    else if (r.status === 429) err.textContent = 'Too many attempts. Try again in a few minutes.';
+    else err.textContent = 'Wrong password.';
+  } catch (_) {
+    err.textContent = "Can't reach the bridge. Check your connection and try again.";
   }
+  btn.disabled = false;
+}
+
+document.getElementById('reauth-pk-btn').addEventListener('click', reauthPasskey);
+document.getElementById('reauth-pw').addEventListener('submit', reauthPassword);
+document.getElementById('reauth-use-pw').addEventListener('click', (e) => {
+  e.preventDefault();
+  document.getElementById('reauth-pk').hidden = true;
+  document.getElementById('reauth-pw').hidden = false;
+  document.getElementById('reauth-err').textContent = '';
+  document.getElementById('reauth-pw-input').focus();
 });
 
 // --- Update banner ---
@@ -1081,22 +1300,29 @@ checkForUpdate();
 setTimeout(checkForUpdate, 15000);
 setInterval(checkForUpdate, 5 * 60 * 1000);
 
-async function reloadCurrentChat() {
-  if (!state.chatId) return;
-  const messagesEl = document.getElementById('messages');
-  const resp = await fetch(`/api/chats/${encodeURIComponent(state.chatId)}/messages`);
-  if (!resp.ok) return;
-  const messages = await resp.json();
-  state.msgOffset = messages.length;
-  state.hasMore = messages.length >= 100;
-  messagesEl.innerHTML = '';
-  let prevSender = null;
-  let prevDate = null;
+// --- Loading and syncing the open conversation ---
+function markRead(chatId, maxRowid) {
+  if (!chatId || !(maxRowid > 0)) return;
+  fetch(`/api/chats/${encodeURIComponent(chatId)}/read`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ max_rowid: maxRowid }),
+  }).catch(() => {});  // fire-and-forget, non-critical
+}
+
+// Text as compared between a bubble drawn locally and the row Messages wrote.
+function normText(t) { return (t || '').replace(/￼/g, '').trim(); }
+
+// Build DOM for `messages` (oldest first): date separators, grouped avatars.
+// Returns the fragment and the date of its last separator.
+function buildMessageNodes(messages) {
+  const frag = document.createDocumentFragment();
+  let prevSender = null, prevDate = null;
   messages.forEach(msg => {
     if (msg.timestamp) {
       const msgDate = new Date(msg.timestamp).toDateString();
       if (msgDate !== prevDate) {
-        messagesEl.appendChild(createDateSeparator(msg.timestamp));
+        frag.appendChild(createDateSeparator(msg.timestamp));
         prevDate = msgDate;
       }
     }
@@ -1107,14 +1333,117 @@ async function reloadCurrentChat() {
     } else {
       prevSender = msg.is_from_me ? '__me__' : null;
     }
-    messagesEl.appendChild(createMessageElement(msg, showAvatar));
+    frag.appendChild(createMessageElement(msg, showAvatar));
   });
+  return { frag, lastDate: prevDate };
+}
+
+function scrollMessagesToEnd() {
+  const el = document.getElementById('messages');
+  el.scrollTop = el.scrollHeight;
+  // Re-scroll after images/media finish loading
+  el.querySelectorAll('img, video').forEach(m => {
+    m.addEventListener('load', () => { el.scrollTop = el.scrollHeight; }, { once: true });
+  });
+}
+
+// Load the open conversation from scratch. Safe against the user clicking
+// another chat while this one is still loading, and against the load failing.
+async function loadOpenChat() {
+  const chatId = state.chatId;
+  if (!chatId) return;
+  const el = document.getElementById('messages');
+  el.innerHTML = '<div class="msgs-note">Loading…</div>';
+  const messages = await api(`/api/chats/${encodeURIComponent(chatId)}/messages`);
+  if (state.chatId !== chatId) return;   // moved to another chat meanwhile; that load owns the screen
+  if (!messages) {
+    // Signed out → the sign-in prompt is up and will reload this afterwards.
+    el.innerHTML = conn.authLost ? '' :
+      '<div class="msgs-note">Couldn\'t load this conversation. <a href="#" id="msgs-retry">Try again</a></div>';
+    const retry = document.getElementById('msgs-retry');
+    if (retry) retry.addEventListener('click', (e) => { e.preventDefault(); loadOpenChat(); });
+    return;
+  }
+  state.msgOffset = messages.length;
+  state.hasMore = messages.length >= 100;
+  el.innerHTML = '';
+  el.appendChild(buildMessageNodes(messages).frag);
   showLastStatus();
   updateFocusBanner();
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-  messagesEl.querySelectorAll('img, video').forEach(el => {
-    el.addEventListener('load', () => { messagesEl.scrollTop = messagesEl.scrollHeight; }, { once: true });
-  });
+  scrollMessagesToEnd();
+  // Persist read horizon so unread badges don't reappear on page reload.
+  markRead(chatId, Math.max(0, ...messages.map(m => m.rowid || 0)));
+}
+
+function setBubbleStatus(bubble, status) {
+  if (!status) return;
+  bubble.dataset.status = status;
+  const failed = status === 'failed';
+  // The server's record wins over a local guess: a bubble marked failed only
+  // because its confirmation got lost in a disconnect is healed here.
+  bubble.classList.toggle('send-failed', failed);
+  if (!failed) { const why = bubble.querySelector('.msg-fail-reason'); if (why) why.remove(); }
+  let el = bubble.querySelector('.msg-status');
+  if (!el) {
+    el = document.createElement('div');
+    el.style.display = 'none';
+    bubble.appendChild(el);
+  }
+  el.className = `msg-status${failed ? ' failed' : ''}`;
+  el.textContent = STATUS_LABELS[status] || '';
+}
+
+// A message from me arrived from the server. If it is the bubble this page
+// drew when I pressed Send, tie the two together (so it's never drawn twice)
+// and return true. False means it was sent somewhere else and is new here.
+function adoptPending(msg) {
+  const mine = [...document.querySelectorAll('#messages .msg.from-me')];
+  const text = normText(msg.text);
+  const hasAtt = !!(msg.attachments && msg.attachments.length);
+  let bubble;
+  if (!text && hasAtt) {
+    // Messages writes a photo and its caption as two rows; the page drew one bubble.
+    bubble = mine.find(b => b._awaitAtt);
+    if (!bubble) return false;
+    bubble._awaitAtt = false;
+    if (bubble._text) return true;   // the caption's row will carry the rowid
+  } else {
+    bubble = mine.find(b => !b.dataset.rowid && b.dataset.clientId && b._text === text);
+    if (!bubble) return false;
+  }
+  if (msg.rowid) bubble.dataset.rowid = msg.rowid;
+  const cid = bubble.dataset.clientId;
+  if (cid && pendingSends.has(cid)) { clearTimeout(pendingSends.get(cid)); pendingSends.delete(cid); }
+  if (msg.status) setBubbleStatus(bubble, msg.status);
+  return true;
+}
+
+// Catch the open conversation up with the server: add what's missing, refresh
+// delivery status, keep everything else as it is.
+async function syncOpenChat() {
+  const chatId = state.chatId;
+  if (!chatId) return;
+  const el = document.getElementById('messages');
+  if (!el.querySelector('.msg')) { await loadOpenChat(); return; }   // nothing on screen worth keeping
+  const messages = await api(`/api/chats/${encodeURIComponent(chatId)}/messages`);
+  if (!messages || state.chatId !== chatId) return;
+  const onScreen = new Map();
+  el.querySelectorAll('.msg[data-rowid]').forEach(b => onScreen.set(b.dataset.rowid, b));
+  let maxRowid = 0;
+  onScreen.forEach((_, k) => { maxRowid = Math.max(maxRowid, Number(k)); });
+  let newestIncoming = 0;
+  for (const msg of messages) {
+    const have = onScreen.get(String(msg.rowid));
+    if (have) { if (msg.is_from_me) setBubbleStatus(have, msg.status); continue; }
+    if (msg.is_from_me && adoptPending(msg)) continue;
+    if (msg.rowid > maxRowid) {
+      appendMessage(msg);
+      if (!msg.is_from_me) newestIncoming = Math.max(newestIncoming, msg.rowid);
+    }
+  }
+  showLastStatus();
+  updateFocusBanner();
+  markRead(chatId, newestIncoming);
 }
 
 function updateSidebarPreview(data) {
@@ -1170,6 +1499,39 @@ function updateTitle() {
   }
 }
 
+// --- Phone layout: conversation <-> list ---
+// On a narrow screen the list and the conversation are separate views. Opening
+// a chat adds a history entry, so the back button, the browser's Back and the
+// phone's back gesture all return to the list.
+const _narrow = window.matchMedia('(max-width: 600px)');
+function enterChatView() {
+  document.body.classList.add('chat-open');
+  if (_narrow.matches && !(history.state && history.state.chatView)) history.pushState({ chatView: true }, '');
+}
+function leaveChatView() {
+  if (!document.body.classList.contains('chat-open')) return;
+  const input = document.getElementById('msg-input');
+  if (state.chatId) {
+    if (input.value) state.drafts[state.chatId] = input.value; else delete state.drafts[state.chatId];
+  }
+  // No conversation is on screen any more, so new messages count as unread again.
+  state.chatId = null;
+  input.value = '';
+  document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
+  document.body.classList.remove('chat-open');
+  document.getElementById('chat-header').textContent = 'Select a conversation';
+  document.getElementById('new-msg-header').style.display = 'none';
+  document.getElementById('messages').style.display = 'none';
+  document.getElementById('focus-banner').style.display = 'none';
+  document.getElementById('compose').style.display = 'none';
+  document.getElementById('empty-state').style.display = '';
+  composeNote('');
+}
+document.getElementById('back-btn').addEventListener('click', () => {
+  if (history.state && history.state.chatView) history.back(); else leaveChatView();
+});
+window.addEventListener('popstate', leaveChatView);
+
 // --- Chat selection ---
 document.getElementById('chat-list').addEventListener('click', async (e) => {
   const item = e.target.closest('.chat-item');
@@ -1210,59 +1572,16 @@ document.getElementById('chat-list').addEventListener('click', async (e) => {
   document.getElementById('compose').style.display = 'flex';
   document.getElementById('send-btn').disabled = false;
   applyServiceTheme();
-  document.body.classList.add('chat-open');
+  enterChatView();
 
-  const messagesEl = document.getElementById('messages');
-  messagesEl.innerHTML = '<div style="color:#555;text-align:center;padding:20px">Loading...</div>';
-
-  const resp = await fetch(`/api/chats/${encodeURIComponent(state.chatId)}/messages`);
-  const messages = await resp.json();
-
-  state.msgOffset = messages.length;
-  if (messages.length < 100) state.hasMore = false;
-
-  messagesEl.innerHTML = '';
-  let prevSender = null;
-  messages.forEach(msg => {
-    let showAvatar = true;
-    if (state.chatStyle === 43 && !msg.is_from_me) {
-      if (prevSender === (msg.sender_id || '')) showAvatar = false;
-      prevSender = msg.sender_id || '';
-    } else {
-      prevSender = msg.is_from_me ? '__me__' : null;
-    }
-    const div = createMessageElement(msg, showAvatar);
-    messagesEl.appendChild(div);
-  });
-  showLastStatus();
-  updateFocusBanner();
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-  // Re-scroll after images/media finish loading
-  messagesEl.querySelectorAll('img, video').forEach(el => {
-    el.addEventListener('load', () => { messagesEl.scrollTop = messagesEl.scrollHeight; }, { once: true });
-  });
-
-  // Persist read horizon so unread badges don't reappear on page reload.
-  // We use the highest rowid from this message batch — incoming messages with
-  // higher rowids will update the horizon when they arrive via WebSocket.
-  if (messages.length > 0) {
-    const maxRowid = Math.max(...messages.map(m => m.rowid || 0));
-    if (maxRowid > 0) {
-      fetch(`/api/chats/${encodeURIComponent(state.chatId)}/read`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ max_rowid: maxRowid }),
-      }).catch(() => {});  // fire-and-forget, non-critical
-    }
-  }
-
-  // Restore draft for this chat
+  // Restore draft for this chat first, so typing never waits on the history load.
   msgInput.value = state.drafts[state.chatId] || '';
   msgInput.style.height = 'auto';
   if (msgInput.value) msgInput.style.height = Math.min(msgInput.scrollHeight, 150) + 'px';
   msgInput.focus();
-});
 
+  await loadOpenChat();
+});
 // Tint the composer green for SMS/RCS threads, blue for iMessage.
 function applyServiceTheme() {
   const isSms = state.service && state.service !== 'iMessage' && state.service !== 'iMessageLite';
@@ -1280,11 +1599,18 @@ async function sendMessage() {
   // New message mode — send via API to new recipients
   if (!state.chatId && newMsgRecipients.length > 0) {
     const recipients = newMsgRecipients.map(r => r.identifier);
-    const resp = await fetch('/api/messages/new', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ recipients, text }),
-    });
+    let resp;
+    try {
+      resp = await fetch('/api/messages/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipients, text }),
+      });
+    } catch (_) {
+      composeNote("Couldn't reach the bridge, so this wasn't sent. Your message is still here.");
+      return;
+    }
+    if (resp.status === 401) { sessionLost(); return; }
     if (resp.ok) {
       const res = await resp.json().catch(() => ({}));
       appendMessage({ text, is_from_me: true, sender_id: 'me', timestamp: new Date().toISOString() });
@@ -1292,8 +1618,8 @@ async function sendMessage() {
       input.style.height = 'auto';
       clearPastePreview();
       document.getElementById('new-msg-header').style.display = 'none';
-      const chatsResp = await fetch('/api/chats');
-      if (chatsResp.ok) refreshChatList(await chatsResp.json());
+      const chats = await api('/api/chats');
+      if (chats) refreshChatList(chats);
       // Jump into the (possibly brand-new group) thread so follow-ups go over WS
       if (res.chat_identifier) openChatById(res.chat_identifier, res.chat_style, res.display_name);
     } else {
@@ -1303,7 +1629,17 @@ async function sendMessage() {
     return;
   }
 
-  if (!state.chatId || !state.ws) return;
+  if (!state.chatId) return;
+  // Not connected: say so and leave what was typed in the box. (This used to
+  // clear the box and draw a "Not Delivered" bubble for a message that never
+  // left the browser.)
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    if (!conn.authLost) {
+      composeNote('Not connected right now, so this wasn\'t sent. Your message is still here; press Send again once it reconnects.');
+      checkAlive();
+    }
+    return;
+  }
 
   // Upload pasted file first, then send via WS
   let filePath = '';
@@ -1312,12 +1648,17 @@ async function sendMessage() {
     form.append('file', pendingFile);
     try {
       const resp = await fetch('/api/upload', { method: 'POST', body: form });
+      if (resp.status === 401) { sessionLost(); return; }
       if (resp.ok) {
         const data = await resp.json();
         filePath = data.file_path;
       }
     } catch (e) {
       console.error('Upload failed', e);
+    }
+    if (!filePath) {
+      composeNote("The attachment couldn't be uploaded, so nothing was sent. Try again.");
+      return;
     }
   }
 
@@ -1333,8 +1674,14 @@ async function sendMessage() {
   if (text) payload.text = text;
   if (filePath) payload.file_path = filePath;
   // A closed socket drops send() silently, so check rather than trust it.
+  // (It can have closed during the upload above.)
   const wsOpen = state.ws && state.ws.readyState === WebSocket.OPEN;
-  if (wsOpen) state.ws.send(JSON.stringify(payload));
+  if (!wsOpen) {
+    composeNote('The connection dropped before this could be sent. Your message is still here; press Send again once it reconnects.');
+    checkAlive();
+    return;
+  }
+  state.ws.send(JSON.stringify(payload));
 
   const msgData = {
     is_from_me: true,
@@ -1349,23 +1696,37 @@ async function sendMessage() {
   }
   appendMessage(msgData);
   updateSidebarPreview({ chat_identifier: state.chatId, text: text || '(image)' });
-  if (!wsOpen) {
-    settleSend(clientId, false, 'Not connected to the bridge. Reconnecting; send it again in a moment.');
-    forceReconnect();
-  } else {
-    pendingSends.set(clientId, setTimeout(() => settleSend(clientId, false,
-      'No confirmation from the bridge. It may not have sent.'), 75000));
-  }
+  pendingSends.set(clientId, setTimeout(() => settleSend(clientId, false,
+    'No confirmation from the bridge. It may not have sent.'), 75000));
 
   input.value = '';
   input.style.height = 'auto';
   clearPastePreview();
   delete state.drafts[state.chatId];
+  composeNote('');
 }
 
+// A line above the composer for things that went wrong with *this* send.
+let _composeNoteTimer = null;
+function composeNote(text) {
+  const el = document.getElementById('compose-note');
+  clearTimeout(_composeNoteTimer);
+  el.textContent = text;
+  el.style.display = text ? 'block' : 'none';
+  if (text) _composeNoteTimer = setTimeout(() => { el.style.display = 'none'; }, 8000);
+}
+
+// Rebuild the sidebar from the server's list. The server's unread counts are
+// the truth (they already account for what was opened here, via the read
+// horizon), except that the conversation on screen is by definition read.
 function refreshChatList(chats) {
   const listEl = document.getElementById('chat-list');
+  const scrollTop = listEl.scrollTop;
+  const openItem = state.chatId
+    ? listEl.querySelector(`.chat-item[data-chat-id="${CSS.escape(state.chatId)}"]`) : null;
   listEl.innerHTML = '';
+  state.unread = {};
+  let sawOpen = false;
   chats.forEach(chat => {
     const div = document.createElement('div');
     div.className = 'chat-item';
@@ -1373,14 +1734,25 @@ function refreshChatList(chats) {
     div.dataset.chatStyle = chat.style;
     if (chat.service) div.dataset.chatService = chat.service;
     div.dataset.chatName = chat.display_name;
-    const count = state.unread[chat.chat_identifier] ?? (chat.unread_count || 0);
-    if (count > 0) {
-      div.classList.add('unread');
-      state.unread[chat.chat_identifier] = count;
+    let count = chat.unread_count || 0;
+    if (chat.chat_identifier === state.chatId) {
+      count = 0;
+      sawOpen = true;
+      div.classList.add('active');
     }
+    state.unread[chat.chat_identifier] = count;
+    if (count > 0) div.classList.add('unread');
     div.innerHTML = `<div class="chat-item-row"><div class="chat-item-name">${escapeHtml(chat.display_name)}</div><span class="unread-badge">${count > 99 ? '99+' : count}</span></div><div class="chat-item-preview">${escapeHtml(chat.last_text)}</div>`;
     listEl.appendChild(div);
   });
+  // The open chat can be outside the server's recent list (opened from the
+  // contact search); keep its row rather than orphaning the conversation.
+  if (openItem && !sawOpen) {
+    openItem.classList.remove('unread');
+    listEl.insertBefore(openItem, listEl.firstChild);
+  }
+  listEl.scrollTop = scrollTop;
+  updateTitle();
 }
 
 document.getElementById('send-btn').addEventListener('click', sendMessage);
@@ -1504,7 +1876,14 @@ function createMessageElement(msg, showAvatar) {
   const msgDiv = document.createElement('div');
   msgDiv.className = `msg ${msg.is_from_me ? 'from-me' : 'from-them'}${msg.is_from_me && isSms ? ' sms' : ''}`;
   if (fromThem && isGroup) msgDiv.dataset.sender = msg.sender_id || '';
-  if (msg.client_id) msgDiv.dataset.clientId = msg.client_id;
+  if (msg.rowid) msgDiv.dataset.rowid = msg.rowid;
+  if (msg.client_id) {
+    // Drawn here on Send, before Messages has a row for it. Kept so the row
+    // can be matched to this bubble when it turns up (see adoptPending).
+    msgDiv.dataset.clientId = msg.client_id;
+    msgDiv._text = normText(msg.text);
+    msgDiv._awaitAtt = !!(msg.attachments && msg.attachments.length);
+  }
   if (msg.is_from_me && msg.status === 'failed') msgDiv.classList.add('send-failed');
   if (msg.is_from_me) {
     // Retained for the "notifications silenced" banner (see updateFocusBanner).
@@ -1586,6 +1965,11 @@ function createMessageElement(msg, showAvatar) {
 
 function appendMessage(msg) {
   const messagesEl = document.getElementById('messages');
+  // Follow the conversation only if you're already at the bottom (or it's your
+  // own message); a new message shouldn't drag you away from older ones.
+  const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 160;
+  const note = messagesEl.querySelector('.msgs-note');
+  if (note) note.remove();
   // Insert date separator if this message is on a different day than the last
   if (msg.timestamp) {
     const msgDate = new Date(msg.timestamp).toDateString();
@@ -1608,7 +1992,13 @@ function appendMessage(msg) {
   }
   const div = createMessageElement(msg, showAvatar);
   messagesEl.appendChild(div);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  state.msgOffset++;   // "load older" pages by offset from the newest message
+  if (atBottom || msg.is_from_me) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    div.querySelectorAll('img, video').forEach(m => {
+      m.addEventListener('load', () => { messagesEl.scrollTop = messagesEl.scrollHeight; }, { once: true });
+    });
+  }
   // A newer message (their reply, or our latest send) may clear/set the banner.
   updateFocusBanner();
 }
@@ -1643,13 +2033,18 @@ const pendingSends = new Map();  // client_id -> confirmation timeout
 
 // The bridge's verdict on one send: drop the timeout and, on failure, mark
 // that bubble "Not Delivered" with the reason.
-function settleSend(clientId, ok, error) {
+function settleSend(clientId, ok, error, rowid) {
   if (!clientId) return;
   clearTimeout(pendingSends.get(clientId));
   pendingSends.delete(clientId);
-  if (ok) return;
   const bubble = document.querySelector(`#messages .msg[data-client-id="${CSS.escape(clientId)}"]`);
   if (!bubble) return;
+  if (rowid && !bubble.dataset.rowid) bubble.dataset.rowid = rowid;
+  if (ok) {
+    // A late confirmation beats an earlier "no confirmation" timeout.
+    if (bubble.classList.contains('send-failed')) { setBubbleStatus(bubble, 'sent'); showLastStatus(); }
+    return;
+  }
   bubble.dataset.status = 'failed';
   bubble.classList.add('send-failed');
   let el = bubble.querySelector('.msg-status');
@@ -1722,17 +2117,21 @@ document.getElementById('messages').addEventListener('scroll', async function() 
   // Save current scroll height to restore position after prepending
   const prevHeight = this.scrollHeight;
 
-  const resp = await fetch(`/api/chats/${encodeURIComponent(state.chatId)}/messages?offset=${state.msgOffset}&limit=100`);
-  const older = await resp.json();
-
-  if (older.length === 0) {
+  const chatId = state.chatId;
+  const page = await api(`/api/chats/${encodeURIComponent(chatId)}/messages?offset=${state.msgOffset}&limit=100`);
+  if (!page || state.chatId !== chatId) {   // failed, or the chat changed while loading
+    state.loadingMore = false;
+    return;
+  }
+  if (page.length === 0) {
     state.hasMore = false;
     state.loadingMore = false;
     return;
   }
 
-  state.msgOffset += older.length;
-  if (older.length < 100) state.hasMore = false;
+  state.msgOffset += page.length;
+  if (page.length < 100) state.hasMore = false;
+  const older = page.filter(m => !m.rowid || !this.querySelector(`.msg[data-rowid="${m.rowid}"]`));
 
   // Prepend older messages at the top
   const fragment = document.createDocumentFragment();
@@ -1795,8 +2194,16 @@ function savePrefs() {
   localStorage.setItem('imsg-prefs', JSON.stringify(prefs));
 }
 
-document.getElementById('prefs-btn').addEventListener('click', () => {
+document.getElementById('prefs-btn').addEventListener('click', async () => {
   document.getElementById('prefs-overlay').classList.add('open');
+  const info = await api('/api/session');
+  const note = document.getElementById('session-note');
+  if (info && info.idle_days) {
+    const latest = new Date(info.ends_by * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+    note.textContent = `This browser stays signed in for ${info.idle_days} days after you last use it (until ${latest} at the latest).`;
+  } else {
+    note.textContent = '';
+  }
 });
 
 document.getElementById('prefs-close').addEventListener('click', () => {
@@ -1921,7 +2328,7 @@ document.getElementById('new-msg-btn').addEventListener('click', () => {
   document.getElementById('compose').style.display = 'flex';
   document.getElementById('send-btn').disabled = false;
   document.getElementById('new-msg-header').style.display = 'flex';
-  document.body.classList.add('chat-open');
+  enterChatView();
 
   // Clear previous recipients
   newMsgRecipients.length = 0;
