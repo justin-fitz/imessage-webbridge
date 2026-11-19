@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch, MagicMock
 
 from imessage_sender import IMessageSender, _validate_identifier
@@ -203,3 +204,9 @@ def test_send_text_timeout_is_a_failure(mock_run):
     sender = IMessageSender()
     assert sender.send_text("+15551234567", 45, "hi") is False
     assert "did not respond" in sender.last_error
+
+
+def test_failed_staging_leaves_nothing_behind(_no_real_staging):
+    from imessage_sender import _stage_for_applescript
+    assert _stage_for_applescript("/nonexistent/photo.jpg") == "/nonexistent/photo.jpg"
+    assert os.listdir(_no_real_staging) == []

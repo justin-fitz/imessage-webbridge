@@ -39,8 +39,8 @@ _CHAT_GUID_PATTERN = re.compile(r"^[A-Za-z]+;[-+];[+\w@.\-]+$")
 
 def _validate_identifier(identifier: str, chat_style: int) -> bool:
     if chat_style == 43:
-        return bool(_GROUP_PATTERN.match(identifier))
-    return bool(_BUDDY_PATTERN.match(identifier))
+        return bool(_GROUP_PATTERN.fullmatch(identifier))
+    return bool(_BUDDY_PATTERN.fullmatch(identifier))
 
 
 def _staging_dir() -> str:
@@ -78,6 +78,7 @@ def _stage_for_applescript(file_path: str) -> str:
     Returns the path to the staged copy (caller must delete it when done).
     Falls back to the original path if the copy fails.
     """
+    tmp_path = None
     try:
         ext = os.path.splitext(file_path)[1] or ".bin"
         fd, tmp_path = tempfile.mkstemp(suffix=ext, dir=_staging_dir())
@@ -87,6 +88,12 @@ def _stage_for_applescript(file_path: str) -> str:
         return tmp_path
     except OSError as e:
         print(f"Warning: could not stage file for AppleScript: {e}")
+        if tmp_path:
+            # Don't leave the empty placeholder behind in ~/Pictures.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         return file_path
 
 
@@ -136,7 +143,7 @@ class IMessageSender:
         # Fall back to the existing thread itself, addressed by its chat.db
         # guid, so Messages routes it on whatever service that thread uses.
         # Covers a service keyword this macOS build's AppleScript rejects.
-        if chat_guid and _CHAT_GUID_PATTERN.match(chat_guid):
+        if chat_guid and _CHAT_GUID_PATTERN.fullmatch(chat_guid):
             first_error = self.last_error
             print(f"[IMSG-SEND] participant send failed ({first_error}); retrying via chat id {chat_guid!r}", flush=True)
             script = """
@@ -243,7 +250,7 @@ end tell
         """
         from contacts import find_group_chat
         for r in recipients:
-            if not _BUDDY_PATTERN.match(r):
+            if not _BUDDY_PATTERN.fullmatch(r):
                 return False, None, f"invalid recipient {r!r}"
         parts = ", ".join(f'participant "{_as_str(r)}" of targetService' for r in recipients)
         attempts: list[str] = []

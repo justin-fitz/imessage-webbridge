@@ -97,13 +97,18 @@ Preferences are saved in your browser's localStorage and persist across sessions
 ### Security
 - **Cookie-based authentication** with a configurable password and passkeys. A browser stays signed in for 30 days after it was last used, 90 days at most (`session_idle_days` / `session_max_days`)
 - **WebSocket authentication** via the session cookie; open sockets are dropped when their session ends or you log out everywhere
-- **JXA message sending** — uses JavaScript for Automation with `json.dumps()` parameterization to prevent command injection
+- **AppleScript message sending** — message text travels in an environment variable, never spliced into the script; identifiers and file paths are validated and escaped
 - **Input validation** — messages only sent to known conversations in chat.db
 - **Chat identifier validation** — regex allowlist blocks malformed identifiers
 - **Attachment tokens** — cryptographic random tokens with 1-hour TTL, auto-pruned
 - **Connection limits** — configurable max WebSocket connections (default 20)
 - **Message length cap** — configurable maximum (default 10,000 characters)
-- **Origin checking** — optional WebSocket origin allowlist
+- **Same-origin only** — the WebSocket and every request that changes something are refused unless they come from the app's own pages (`allowed_origins` adds exceptions). The session cookie alone doesn't guarantee this: `SameSite` treats sibling subdomains as the same site
+- **Untrusted content** — message text, file names and reactions are escaped for HTML and attributes, and a Content-Security-Policy with per-response nonces refuses any script that isn't the app's own, so markup in a message can't run or phone home
+- **Attachments** — images, video, audio and PDF display in place; everything else (HTML, SVG, unknown types) is served as a sandboxed download with `nosniff`
+- **Sessions hashed at rest** — the state DB holds a SHA-256 of each session cookie, never the cookie; DB and logs are owner-only (0600)
+- **Password guessing** — per-address lockout plus a cap across all addresses, with a Home Assistant alert
+- **Temporary files** — uploads and converted photos are deleted after 3 days
 
 ## Configuration
 

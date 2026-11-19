@@ -801,7 +801,7 @@
   <button type="button" id="notify-offer-no">Not now</button>
 </div>
 <div id="update-banner">⬆ New version available — tap to reload</div>
-<script>const _BUILD = "{{ build_number }}";</script>
+<script nonce="{{ csp_nonce }}">const _BUILD = "{{ build_number }}";</script>
 
 <div id="prefs-overlay">
   <div id="prefs-panel">
@@ -848,8 +848,8 @@
       <div id="passkey-list" style="margin-top:8px;font-size:12px;color:#bbb"></div>
     </div>
     <button id="prefs-close">Done</button>
-    <button id="logout-btn" onclick="window.location.href='/logout'" style="margin-top:8px;width:100%;padding:8px;background:#ff3b30;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer">Logout</button>
-    <form method="POST" action="/logout-all" onsubmit="return confirm('Log out every device and browser that is signed in to the bridge?')" style="margin:0">
+    <button id="logout-btn" style="margin-top:8px;width:100%;padding:8px;background:#ff3b30;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer">Logout</button>
+    <form method="POST" action="/logout-all" id="logout-all-form" style="margin:0">
       <button type="submit" style="margin-top:6px;width:100%;padding:8px;background:#333;color:#ff3b30;border:1px solid #ff3b30;border-radius:8px;font-size:13px;cursor:pointer">Log out everywhere</button>
     </form>
     <div id="session-note"></div>
@@ -898,7 +898,7 @@
 </div>
 
 <script src="/static/passkey.js?v={{ build_number }}"></script>
-<script>
+<script nonce="{{ csp_nonce }}">
 const state = {
   chatId: null,
   chatStyle: 45,
@@ -928,8 +928,8 @@ async function loadPasskeys() {
     el.innerHTML = keys.map(k => {
       const used = k.last_used_at ? new Date(k.last_used_at*1000).toLocaleDateString() : 'never';
       return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-top:1px solid #333">
-        <span>&#128273; ${k.name.replace(/</g,'&lt;')} <span style="color:#777">· last used ${used}</span></span>
-        <button data-id="${k.id}" class="pk-del" style="background:none;border:none;color:#ff3b30;cursor:pointer;font-size:12px">Remove</button></div>`;
+        <span>&#128273; ${escapeHtml(k.name)} <span style="color:#777">· last used ${used}</span></span>
+        <button data-id="${escapeHtml(k.id)}" class="pk-del" style="background:none;border:none;color:#ff3b30;cursor:pointer;font-size:12px">Remove</button></div>`;
     }).join('');
     el.querySelectorAll('.pk-del').forEach(b => b.addEventListener('click', () => removePasskey(b.dataset.id)));
   } catch (e) {}
@@ -2038,11 +2038,11 @@ function createMessageElement(msg, showAvatar) {
       if (!att.url) continue;
       const mime = att.mime_type || '';
       if (mime.startsWith('image/')) {
-        html += `<img class="msg-img" src="${att.url}" alt="${escapeHtml(att.transfer_name)}" loading="lazy" onclick="window.open(this.src)">`;
+        html += `<img class="msg-img" src="${escapeHtml(att.url)}" alt="${escapeHtml(att.transfer_name)}" loading="lazy">`;
       } else if (mime.startsWith('video/')) {
-        html += `<video class="msg-img" src="${att.url}" controls preload="metadata"></video>`;
+        html += `<video class="msg-img" src="${escapeHtml(att.url)}" controls preload="metadata"></video>`;
       } else {
-        html += `<a class="msg-file" href="${att.url}" target="_blank" download>${escapeHtml(att.transfer_name)}</a>`;
+        html += `<a class="msg-file" href="${escapeHtml(att.url)}" target="_blank" download>${escapeHtml(att.transfer_name)}</a>`;
       }
     }
   }
@@ -2053,7 +2053,7 @@ function createMessageElement(msg, showAvatar) {
     msg.reactions.forEach(r => { counts[r.emoji] = (counts[r.emoji] || 0) + 1; });
     html += '<div class="msg-reactions">';
     for (const [emoji, count] of Object.entries(counts)) {
-      html += `<span class="reaction">${emoji}${count > 1 ? `<span class="count">${count}</span>` : ''}</span>`;
+      html += `<span class="reaction">${escapeHtml(emoji)}${count > 1 ? `<span class="count">${count}</span>` : ''}</span>`;
     }
     html += '</div>';
   }
@@ -2220,15 +2220,32 @@ function showLastStatus() {
   document.querySelectorAll('#messages .msg-status.failed').forEach(el => el.style.display = 'block');
 }
 
+// Everything shown in a conversation was written by someone else. Quotes are
+// escaped along with < > &, because this goes into attributes too (alt="...",
+// href="..."): escaping only the angle brackets let a file name or a link
+// containing a double quote add attributes of its own to the tag.
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  return String(text == null ? '' : text).replace(/[&<>"']/g, c => HTML_ESCAPES[c]);
 }
 
+// Takes text that is already escaped. A link ends at whitespace or at an
+// escaped quote or bracket, and sentence punctuation after it stays outside.
 function linkify(html) {
-  return html.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">$1</a>');
+  return html.replace(/https?:\/\/(?:(?!&quot;|&#39;|&lt;|&gt;)[^\s<])+/g, (url) => {
+    let tail = '';
+    const m = url.match(/[.,;:!?]+$/);
+    if (m) { tail = m[0]; url = url.slice(0, -tail.length); }
+    if (url.endsWith(')') && !url.includes('(')) { tail = ')' + tail; url = url.slice(0, -1); }
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline">${url}</a>${tail}`;
+  });
 }
+
+// Click a picture to open it full size.
+document.addEventListener('click', (e) => {
+  const img = e.target instanceof Element && e.target.closest('img.msg-img');
+  if (img) window.open(img.src, '_blank');
+});
 
 // --- Infinite scroll ---
 document.getElementById('messages').addEventListener('scroll', async function() {
@@ -2327,6 +2344,11 @@ document.getElementById('prefs-btn').addEventListener('click', async () => {
   }
 });
 
+document.getElementById('logout-btn').addEventListener('click', () => { window.location.href = '/logout'; });
+document.getElementById('logout-all-form').addEventListener('submit', (e) => {
+  if (!confirm('Log out every device and browser that is signed in to the bridge?')) e.preventDefault();
+});
+
 document.getElementById('prefs-close').addEventListener('click', () => {
   savePrefs();
   document.getElementById('prefs-overlay').classList.remove('open');
@@ -2417,10 +2439,19 @@ window.addEventListener('focus', () => {
 // Why a notification can't be shown right now, or '' if it can.
 function notifyBlocker() {
   if (!('Notification' in window)) return 'This browser has no notification support for this page.';
-  if (Notification.permission === 'denied') return 'Notifications are blocked for this app. Allow them in System Settings > Notifications (or the browser\'s site settings), then try again.';
+  if (Notification.permission === 'denied') return 'Notifications are blocked for this app. ' + NOTIFY_WHERE;
   if (Notification.permission !== 'granted') return 'Not allowed yet. Turn the switch on and choose Allow.';
   return '';
 }
+
+// macOS has the last word, and the page can't see its answer: the browser
+// reports "granted" even while System Settings is refusing. Installed web
+// apps each have their own entry there (Chrome 152 and later, and Safari's
+// Add to Dock), separate from the browser's, and off until allowed.
+const IS_INSTALLED_APP = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const NOTIFY_WHERE = IS_INSTALLED_APP
+  ? 'On the Mac, open System Settings > Notifications, choose this app in the list (it has its own entry, separate from your browser), and turn on "Allow notifications" with Banners or Alerts.'
+  : 'On the Mac, open System Settings > Notifications, choose your browser, and turn on "Allow notifications". Also check the site is allowed in the browser\'s own notification settings.';
 
 // Post a notification. Through the service worker when there is one: that is
 // the route installed web apps support everywhere (a page-made `new
@@ -2493,7 +2524,22 @@ function updateNotifyStatus(extra) {
 
 document.getElementById('notify-test-btn').addEventListener('click', async () => {
   const why = await postNotification('Test notification', 'If you can read this, notifications work.', null);
-  updateNotifyStatus(why || 'Sent. If nothing appeared, macOS is holding it back: check System Settings > Notifications for this app (or for your browser), and that no Focus is on.');
+  if (why) { updateNotifyStatus(why); return; }
+  updateNotifyStatus('Sent…');
+  // Ask the system whether it took it. A notification the Mac refused never
+  // reaches Notification Center, so it isn't in this list a moment later.
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  let landed = null;
+  try {
+    const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+    if (reg && reg.getNotifications) landed = (await reg.getNotifications({ tag: 'imsg-test' })).length > 0;
+  } catch (_) {}
+  if (landed === false) {
+    updateNotifyStatus('Sent, but it doesn\'t look like the Mac accepted it. ' + NOTIFY_WHERE);
+    document.getElementById('notify-status').classList.add('warn');
+  } else {
+    updateNotifyStatus('Sent. If no banner appeared: a Focus (Do Not Disturb) is on, or this app\'s alert style is set to None. ' + NOTIFY_WHERE);
+  }
 });
 
 // Installed as an app, notifications are off until asked for (an installed

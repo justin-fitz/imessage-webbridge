@@ -1,6 +1,9 @@
 import asyncio
+import hashlib
 import json
+import mimetypes
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -181,7 +184,29 @@ def _init_session_db(db_path: str):
     """)
     _session_db.execute("DROP TABLE IF EXISTS chat_read_state")
     _session_db.execute("DELETE FROM sessions WHERE expiry < ?", (time.time(),))
+    # Sessions used to be stored as the raw cookie value. Replace each with its
+    # hash in place, so existing logins keep working (see _token_key).
+    migrated = 0
+    for (tok,) in _session_db.execute("SELECT token FROM sessions").fetchall():
+        if not re.fullmatch(r"[0-9a-f]{64}", tok):
+            _session_db.execute("UPDATE OR REPLACE sessions SET token = ? WHERE token = ?", (_token_key(tok), tok))
+            migrated += 1
     _session_db.commit()
+    if migrated:
+        # Squeeze the old values out of the file itself (they'd otherwise
+        # linger in the write-ahead log and in freed pages).
+        try:
+            _session_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            _session_db.execute("VACUUM")
+            _session_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as e:
+            print(f"Could not compact the state DB after hashing sessions: {e}")
+    # Logins, passkeys and read state: nobody else on this Mac needs to read them.
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.chmod(db_path + suffix, 0o600)
+        except OSError:
+            pass
 
 
 def _set_read_horizon(chat_identifier: str, max_rowid: int) -> None:
@@ -210,12 +235,19 @@ def _clear_read_horizon(chat_identifier: str) -> None:
     _session_db.commit()
 
 
+def _token_key(token: str | None) -> str:
+    """What the sessions table stores for a cookie value: its SHA-256. The
+    cookie itself is never written to disk, so a copy of bridge.db (a backup,
+    another account on this Mac) can't be turned back into a working login."""
+    return hashlib.sha256((token or "").encode()).hexdigest()
+
+
 def _create_session(ip: str = "") -> str:
     token = secrets.token_urlsafe(32)
     now = time.time()
     _session_db.execute(
         "INSERT INTO sessions (token, expiry, last_seen, ip) VALUES (?, ?, ?, ?)",
-        (token, now + _SESSION_TTL, now, ip),
+        (_token_key(token), now + _SESSION_TTL, now, ip),
     )
     _session_db.commit()
     return token
@@ -229,6 +261,7 @@ def _session_remaining(token: str | None, touch: bool = True) -> float:
     whether the person is still there."""
     if not token or not _session_db:
         return 0.0
+    token = _token_key(token)
     row = _session_db.execute(
         "SELECT expiry, last_seen FROM sessions WHERE token = ?", (token,)
     ).fetchone()
@@ -255,7 +288,7 @@ def _valid_session(token: str | None, touch: bool = True) -> bool:
 def _touch_session(token: str | None) -> None:
     """Keep a session alive from WebSocket traffic (pongs), bypassing the 60s throttle."""
     if token and _session_db:
-        _session_db.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (time.time(), token))
+        _session_db.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (time.time(), _token_key(token)))
         _session_db.commit()
 
 
@@ -307,6 +340,91 @@ def _rp(request: Request) -> tuple[str, str]:
     port = request.url.port
     origin = f"{scheme}://{host}" + (f":{port}" if port and port not in (80, 443) else "")
     return host, origin
+
+
+# ---------------------------------------------------------------------------
+# Browser-facing hardening.
+#
+# Everything in a conversation is written by someone else: message text, file
+# names, reaction text. The page escapes all of it, and this policy is the
+# second line: scripts run only from this server's own files or with the
+# per-response nonce, so markup that slips through can't execute, load
+# anything, or send what it reads to another site.
+def _csp(nonce: str, host: str) -> str:
+    # 'self' covers same-origin WebSockets in current browsers; name the
+    # socket explicitly for the ones where it doesn't.
+    ws = f" ws://{host} wss://{host}" if re.fullmatch(r"[A-Za-z0-9.\-:\[\]]+", host or "") else ""
+    return "; ".join((
+        "default-src 'self'",
+        f"script-src 'self' 'nonce-{nonce}'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob:",
+        "media-src 'self' blob:",
+        f"connect-src 'self'{ws}",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    ))
+
+
+_STATIC_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    # Nothing to other sites. Not "no-referrer": that also makes browsers send
+    # `Origin: null` on this app's own form posts, defeating the check below.
+    "Referrer-Policy": "same-origin",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+}
+
+
+def _same_origin(origin: str, host: str, allowed: set[str]) -> bool:
+    """Is a request's Origin this server itself (or one the config allows)?"""
+    if origin in allowed:
+        return True
+    try:
+        return urllib.parse.urlsplit(origin).netloc.lower() == (host or "").lower() != ""
+    except ValueError:
+        return False
+
+
+# Attachment types a browser may display in place. Anything else (HTML, SVG,
+# text, unknown) is handed over as a download: opened as a page it would run
+# with this site's login, and the file comes from whoever sent the message.
+_INLINE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/heif",
+                 "image/tiff", "image/bmp", "application/pdf"}
+
+
+def _attachment_response(path: str, media_type: str | None = None) -> FileResponse:
+    media_type = media_type or mimetypes.guess_type(path)[0] or "application/octet-stream"
+    inline = media_type in _INLINE_TYPES or media_type.startswith(("video/", "audio/"))
+    headers = {"Cache-Control": "private, max-age=3600"}
+    if not inline:
+        # `sandbox` as well: an <img> can still show an SVG, but nothing in the
+        # file can run even if it is opened directly.
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'unsafe-inline'"
+        return FileResponse(path, media_type=media_type, headers=headers,
+                            filename=os.path.basename(path), content_disposition_type="attachment")
+    return FileResponse(path, media_type=media_type, headers=headers)
+
+
+def _prune_dir(directory: str, max_age: float) -> int:
+    """Delete plain files in `directory` not touched for `max_age` seconds."""
+    removed, cutoff = 0, time.time() - max_age
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.is_file(follow_symlinks=False) and entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                os.unlink(entry.path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 # WebSocket close codes the web client acts on (application range 4000-4999).
@@ -691,6 +809,7 @@ def find_chat_for_identifier(db_path: str, identifier: str) -> dict | None:
 
 _attachment_registry: dict[str, tuple[str, float]] = {}
 _ATTACHMENT_TTL = 3600
+_TEMP_MAX_AGE = 3 * 86400     # uploads and converted photos in temp_dir
 
 
 def _register_attachment(filepath: str) -> str | None:
@@ -716,7 +835,6 @@ _TAPBACK_MAP = {
 # Types 3000-3005 remove the corresponding 2000-2005 reaction
 _TAPBACK_REMOVE = {3000, 3001, 3002, 3003, 3004, 3005}
 
-import re
 _REACTED_PATTERN = re.compile(r'^Reacted (.+?) to ')
 
 
@@ -997,7 +1115,7 @@ LOGIN_HTML = """<!DOCTYPE html>
   .hint { color: #636366; font-size: 11px; margin-top: 18px; line-height: 1.4; }
 </style>
 </head><body>
-<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');</script>
+<script nonce="{nonce}">if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');</script>
 <noscript><style>#pw-form { display: block !important; } #pk-view { display: none !important; }</style></noscript>
 <div class="card">
   <img src="/static/logo2.svg" alt="" class="login-logo">
@@ -1019,7 +1137,7 @@ LOGIN_HTML = """<!DOCTYPE html>
   <div class="hint">You stay signed in on this browser for {idle_days} days after you last use it.</div>
 </div>
 <script src="/static/passkey.js?v={build}"></script>
-<script>
+<script nonce="{nonce}">
 const SIGNED_OUT = {signed_out}, PASSWORD_FIRST = {pw_first}, HAVE_PASSKEYS = {have_passkeys};
 const pkBtn = document.getElementById('pk-btn'), pkErr = document.getElementById('pk-err');
 const PK_LABEL = pkBtn.innerHTML;
@@ -1077,7 +1195,7 @@ def _fmt_days(seconds: float) -> str:
     return f"{days:g}" if days < 10 else str(round(days))
 
 
-def _login_html(error: str = "", password_first: bool = False, signed_out: bool = False) -> str:
+def _login_html(error: str = "", password_first: bool = False, signed_out: bool = False, nonce: str = "") -> str:
     """Render the login page. Passkey sign-in is the default view; the password
     form opens first only when no passkey is enrolled or `password_first` is set
     (a password attempt just failed, so keep the user where they were).
@@ -1094,6 +1212,7 @@ def _login_html(error: str = "", password_first: bool = False, signed_out: bool 
             .replace("{notice}", '<div class="notice">You\'re signed out.</div>' if signed_out else "")
             .replace("{idle_days}", _fmt_days(_SESSION_IDLE))
             .replace("{build}", _read_build_number())
+            .replace("{nonce}", nonce)
             .replace("{error}", error))
 
 
@@ -1172,12 +1291,61 @@ def create_app(core: AppCore) -> FastAPI:
     allowed_origins = set(core.config.web.allowed_origins)
     login_rate_limit = core.config.web.login_rate_limit
     login_rate_window = core.config.web.login_rate_window
+    failed_logins: list[float] = []            # wrong passwords from any address
+    failed_login_cap = login_rate_limit * 6    # per login_rate_window
 
-    def require_auth(session: str | None = Cookie(default=None, alias="session")):
-        if not password:
-            return
-        if not _valid_session(session):
-            raise HTTPException(status_code=303, headers={"Location": "/login"})
+    def _too_many_failed_logins(now: float) -> bool:
+        failed_logins[:] = [t for t in failed_logins if now - t < login_rate_window]
+        return len(failed_logins) >= failed_login_cap
+
+    def _note_failed_login(now: float) -> None:
+        failed_logins.append(now)
+        if len(failed_logins) == failed_login_cap:
+            _notify("iMessage bridge: password sign-in paused",
+                    f"{failed_login_cap} wrong passwords in {login_rate_window // 60} minutes, from several addresses",
+                    critical=True)
+        # Forget addresses whose attempts have aged out, so the table can't grow without bound.
+        for ip in [ip for ip, ts in _login_attempts.items() if not ts or now - ts[-1] > login_rate_window]:
+            _login_attempts.pop(ip, None)
+
+    @app.middleware("http")
+    async def harden(request: Request, call_next):
+        # A request that changes something must come from this app's own pages.
+        # The session cookie is SameSite=Strict, but "same site" includes every
+        # other *.studiox.net host, so a page on a sibling subdomain could
+        # otherwise post here with the cookie attached.
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            fetch_site = request.headers.get("sec-fetch-site")
+            if fetch_site is not None:
+                # The browser's own statement of where the request came from.
+                # Preferred over Origin, which browsers blank to "null" on some
+                # same-origin posts (depending on the referrer policy).
+                ok = fetch_site in ("same-origin", "none") or origin in allowed_origins
+            elif origin is not None:
+                ok = _same_origin(origin, request.headers.get("host", ""), allowed_origins)
+            else:
+                ok = True       # neither header: not a browser, so no cookie to ride on
+            if not ok:
+                print(f"Refused cross-origin {request.method} {request.url.path} from {origin or 'another site'}", flush=True)
+                return Response("Cross-origin request refused", status_code=403)
+        request.state.csp_nonce = secrets.token_urlsafe(16)
+        response = await call_next(request)
+        # Attachments set their own policy (see _attachment_response). The
+        # page's would stop a browser's built-in PDF viewer from opening one.
+        is_file = request.url.path.startswith("/api/attachments/")
+        for name, value in _STATIC_HEADERS.items():
+            if not (is_file and name == "X-Frame-Options"):
+                response.headers.setdefault(name, value)
+        if not is_file:
+            response.headers.setdefault(
+                "Content-Security-Policy", _csp(request.state.csp_nonce, request.headers.get("host", "")))
+        if request.url.scheme == "https":
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+        # Conversations and contacts shouldn't sit in the browser's disk cache.
+        if not request.url.path.startswith("/static/"):
+            response.headers.setdefault("Cache-Control", "no-store")
+        return response
 
     @app.on_event("startup")
     async def startup():
@@ -1189,15 +1357,27 @@ def create_app(core: AppCore) -> FastAPI:
         print(f"Web UI started — http://{core.config.web.host}:{core.config.web.port}")
 
     async def _attachment_prune_loop():
+        from imessage_sender import _staging_dir
+        last_sweep = 0.0
         while True:
             _prune_attachments()
+            # Uploads and converted photos are copies of private pictures; don't
+            # keep them once they've done their job. Hourly is plenty.
+            if time.time() - last_sweep > 3600:
+                last_sweep = time.time()
+                n = await asyncio.to_thread(_prune_dir, _temp_dir, _TEMP_MAX_AGE)
+                # Copies staged for Messages, normally removed a minute after
+                # the send; a restart inside that minute strands them.
+                n += await asyncio.to_thread(_prune_dir, _staging_dir(), 86400)
+                if n:
+                    print(f"Removed {n} stale temporary file(s)", flush=True)
             await asyncio.sleep(300)
 
     @app.get("/login", response_class=HTMLResponse)
-    async def login_page(signedout: str = "", session: str | None = Cookie(default=None, alias="session")):
+    async def login_page(request: Request, signedout: str = "", session: str | None = Cookie(default=None, alias="session")):
         if not password or _valid_session(session):
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_login_html(signed_out=bool(signedout)))
+        return HTMLResponse(_login_html(signed_out=bool(signedout), nonce=request.state.csp_nonce))
 
     @app.get("/api/session")
     async def api_session(session: str | None = Cookie(default=None, alias="session")):
@@ -1209,7 +1389,7 @@ def create_app(core: AppCore) -> FastAPI:
         remaining = _session_remaining(session)
         if remaining <= 0:
             raise HTTPException(status_code=401)
-        expiry = _session_db.execute("SELECT expiry FROM sessions WHERE token = ?", (session,)).fetchone()[0]
+        expiry = _session_db.execute("SELECT expiry FROM sessions WHERE token = ?", (_token_key(session),)).fetchone()[0]
         return {"ok": True, "expires_in": int(remaining), "ends_by": int(expiry),
                 "idle_days": _fmt_days(_SESSION_IDLE)}
 
@@ -1218,6 +1398,7 @@ def create_app(core: AppCore) -> FastAPI:
         client_ip = request.client.host if request.client else "unknown"
         now = time.time()
 
+        nonce = request.state.csp_nonce
         # Rate limiting
         attempts = _login_attempts.get(client_ip, [])
         attempts = [t for t in attempts if now - t < login_rate_window]
@@ -1227,7 +1408,16 @@ def create_app(core: AppCore) -> FastAPI:
                 _login_attempts[client_ip] = attempts
                 _notify_login(client_ip, ok=False, detail=f"{login_rate_limit} wrong passwords")
             return HTMLResponse(
-                _login_html('<div class="error">Too many attempts. Try again later.</div>', password_first=True),
+                _login_html('<div class="error">Too many attempts. Try again later.</div>', password_first=True, nonce=nonce),
+                status_code=429,
+            )
+        # The per-address limit above means little to someone with many
+        # addresses (any IPv6 network has billions). Cap wrong passwords from
+        # everywhere combined too; passkey sign-in is unaffected.
+        if _too_many_failed_logins(now):
+            return HTMLResponse(
+                _login_html('<div class="error">Password sign-in is paused after repeated wrong passwords. '
+                            'Use a passkey, or try again later.</div>', password_first=True, nonce=nonce),
                 status_code=429,
             )
 
@@ -1241,12 +1431,13 @@ def create_app(core: AppCore) -> FastAPI:
 
         attempts.append(now)
         _login_attempts[client_ip] = attempts
-        return HTMLResponse(_login_html('<div class="error">Invalid password</div>', password_first=True), status_code=401)
+        _note_failed_login(now)
+        return HTMLResponse(_login_html('<div class="error">Invalid password</div>', password_first=True, nonce=nonce), status_code=401)
 
     @app.get("/logout")
     async def logout(session: str | None = Cookie(default=None, alias="session")):
         if session and _session_db:
-            _session_db.execute("DELETE FROM sessions WHERE token = ?", (session,))
+            _session_db.execute("DELETE FROM sessions WHERE token = ?", (_token_key(session),))
             _session_db.commit()
         resp = RedirectResponse("/login?signedout=1", status_code=303)
         resp.delete_cookie("session")
@@ -1393,7 +1584,8 @@ def create_app(core: AppCore) -> FastAPI:
         chats = await asyncio.to_thread(
             get_recent_chats, core.config.imessage.db_path, contact_store.contacts
         )
-        return templates.TemplateResponse(request, "chat.html", {"chats": chats, "build_number": build_number})
+        return templates.TemplateResponse(request, "chat.html", {
+            "chats": chats, "build_number": build_number, "csp_nonce": request.state.csp_nonce})
 
     @app.get("/api/version")
     async def api_version():
@@ -1541,18 +1733,36 @@ def create_app(core: AppCore) -> FastAPI:
 
         ext = os.path.splitext(filepath)[1].lower()
         if ext in (".heic", ".heif"):
-            jpeg_path = os.path.join(core.config.app.temp_dir, f"{token}.jpg")
-            if not os.path.exists(jpeg_path):
+            # One converted copy per photo, named for the photo rather than for
+            # this link. (Named per link, every view of a conversation made a
+            # fresh JPEG of every photo in it and none was ever deleted.)
+            try:
+                st = os.stat(filepath)
+                key = hashlib.sha256(f"{filepath}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:32]
+            except OSError:
+                key = token
+            jpeg_path = os.path.join(core.config.app.temp_dir, f"heic-{key}.jpg")
+            if os.path.exists(jpeg_path):
+                try:
+                    os.utime(jpeg_path)     # still in use: keep it from the pruner
+                except OSError:
+                    pass
+            else:
                 os.makedirs(core.config.app.temp_dir, mode=0o700, exist_ok=True)
                 import subprocess
-                subprocess.run(
-                    ["sips", "-s", "format", "jpeg", "-s", "formatOptions", "80", filepath, "--out", jpeg_path],
+                part = f"{jpeg_path[:-4]}.{secrets.token_hex(4)}.part.jpg"   # sips wants a .jpg name
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["sips", "-s", "format", "jpeg", "-s", "formatOptions", "80", filepath, "--out", part],
                     capture_output=True, timeout=15,
                 )
+                if os.path.exists(part):
+                    os.chmod(part, 0o600)
+                    os.replace(part, jpeg_path)
             if os.path.exists(jpeg_path):
-                return FileResponse(jpeg_path, media_type="image/jpeg")
+                return _attachment_response(jpeg_path, "image/jpeg")
 
-        return FileResponse(filepath)
+        return _attachment_response(filepath)
 
     _UPLOAD_MAX = 25 * 1024 * 1024  # 25 MB
     _UPLOAD_ALLOWED_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp",
@@ -1569,7 +1779,9 @@ def create_app(core: AppCore) -> FastAPI:
         data = await file.read(_UPLOAD_MAX + 1)
         if len(data) > _UPLOAD_MAX:
             raise HTTPException(status_code=413, detail="File too large (25 MB max)")
-        ext = os.path.splitext(file.filename or "file")[1].lower() or ".png"
+        ext = os.path.splitext(file.filename or "file")[1].lower()
+        if not re.fullmatch(r"\.[a-z0-9]{1,8}", ext):
+            ext = ".png"
         safe_name = f"{secrets.token_urlsafe(16)}{ext}"
         dest = os.path.abspath(os.path.join(core.config.app.temp_dir, safe_name))
         os.makedirs(core.config.app.temp_dir, mode=0o700, exist_ok=True)
@@ -1583,8 +1795,11 @@ def create_app(core: AppCore) -> FastAPI:
         nonlocal known_chats
         # Check Origin header before doing anything else (defense against
         # cross-origin WS upgrades that could ride on the session cookie).
+        # Browsers always send Origin on a WebSocket; a missing one is a
+        # non-browser client, which has no cookie jar for a page to ride on.
         origin = ws.headers.get("origin", "")
-        if allowed_origins and origin and origin not in allowed_origins:
+        if origin and not _same_origin(origin, ws.headers.get("host", ""), allowed_origins):
+            print(f"Refused WebSocket from origin {origin!r}", flush=True)
             await ws.close(code=1008)
             return
 

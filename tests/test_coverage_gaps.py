@@ -122,10 +122,10 @@ class TestSessionManagement:
         assert _valid_session("") is False
 
     def test_expired_session(self, tmp_path):
-        from web_server import _init_session_db, _valid_session, _session_db
+        from web_server import _init_session_db, _valid_session, _session_db, _token_key
         _init_session_db(str(tmp_path / "sessions.db"))
         # Insert already-expired session
-        _session_db.execute("INSERT INTO sessions (token, expiry) VALUES (?, ?)", ("expired-tok", time.time() - 1))
+        _session_db.execute("INSERT INTO sessions (token, expiry) VALUES (?, ?)", (_token_key("expired-tok"), time.time() - 1))
         _session_db.commit()
         assert _valid_session("expired-tok") is False
 
@@ -684,7 +684,7 @@ class TestAppEndpoints:
     def test_session_ends_when_idle_or_past_expiry(self, tmp_path):
         import web_server
         client, _ = self._make_client(tmp_path)
-        token = self._login(client)
+        token = web_server._token_key(self._login(client))
         db = web_server._session_db
         # Used yesterday: still signed in.
         db.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (time.time() - 86400, token))
@@ -694,7 +694,7 @@ class TestAppEndpoints:
         assert client.get("/api/session").status_code == 401
         assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
         # In constant use but past the absolute limit: signed out too.
-        token = self._login(client)
+        token = web_server._token_key(self._login(client))
         db.execute("UPDATE sessions SET expiry = ? WHERE token = ?", (time.time() - 1, token))
         assert client.get("/api/session").status_code == 401
 
@@ -806,11 +806,12 @@ class TestSessionExpiry:
         import web_server
         web_server._init_session_db(str(tmp_path / "sessions.db"))
         # Insert a session that expired 10 seconds ago
-        web_server._session_db.execute("INSERT INTO sessions (token, expiry) VALUES (?, ?)", ("exp-tok", time.time() - 10))
+        key = web_server._token_key("exp-tok")
+        web_server._session_db.execute("INSERT INTO sessions (token, expiry) VALUES (?, ?)", (key, time.time() - 10))
         web_server._session_db.commit()
         assert web_server._valid_session("exp-tok") is False
         # Should have been deleted
-        row = web_server._session_db.execute("SELECT token FROM sessions WHERE token = 'exp-tok'").fetchone()
+        row = web_server._session_db.execute("SELECT token FROM sessions WHERE token = ?", (key,)).fetchone()
         assert row is None
 
 
@@ -1297,8 +1298,14 @@ class TestWebSocketEndpoint:
             assert json.loads(ws.receive_text()) == {
                 "type": "send_result", "client_id": "c9", "chat_identifier": "+15551234567",
                 "ok": True, "error": "", "rowid": 42}
-            ws.send_text('{"type": "ping"}')      # round trip, so the echo has gone out
-            ws.receive_text()
+            # The echo follows the verdict after a hop through a worker thread;
+            # keep the socket busy until it has gone out.
+            for _ in range(100):
+                if other.send_text.called:
+                    break
+                ws.send_text('{"type": "ping"}')
+                ws.receive_text()
+                time.sleep(0.02)
         echo = json.loads(other.send_text.call_args[0][0])
         assert (echo["type"], echo["is_from_me"], echo["rowid"], echo["text"]) == ("message", True, 42, "hi there")
 
@@ -1471,3 +1478,190 @@ def test_history_marks_errored_message_failed(tmp_path):
     by_id = {m["rowid"]: m for m in msgs}
     assert by_id[3]["status"] == "failed"
     assert by_id[1]["status"] == "sent"
+
+
+# --- Hardening: what a hostile message, a hostile page or a copied file can do ---
+
+class TestHardening:
+    _make_client = TestAppEndpoints._make_client
+    _login = TestAppEndpoints._login
+
+    def test_session_cookie_is_not_what_the_database_stores(self, tmp_path):
+        import web_server
+        client, _ = self._make_client(tmp_path)
+        cookie = self._login(client)
+        stored = [r[0] for r in web_server._session_db.execute("SELECT token FROM sessions")]
+        assert stored == [web_server._token_key(cookie)] and cookie not in stored
+        assert client.get("/api/session").status_code == 200
+        client.get("/logout")
+        assert web_server._session_db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+    def test_sessions_from_before_hashing_survive_the_upgrade(self, tmp_path):
+        import web_server
+        path = str(tmp_path / "old.db")
+        web_server._init_session_db(path)
+        web_server._session_db.execute(
+            "INSERT INTO sessions (token, expiry, last_seen) VALUES (?, ?, ?)",
+            ("old-raw-cookie-value", time.time() + 3600, time.time()))
+        web_server._session_db.commit()
+        web_server._session_db.close()
+        web_server._init_session_db(path)       # restart on the new code
+        assert web_server._valid_session("old-raw-cookie-value")
+        assert b"old-raw-cookie-value" not in open(path, "rb").read()
+        assert oct(os.stat(path).st_mode & 0o777) == "0o600"
+
+    def test_pages_carry_a_policy_that_only_runs_our_scripts(self, tmp_path):
+        import re
+        client, _ = self._make_client(tmp_path)
+        login = client.get("/login")
+        self._login(client)
+        for resp in (login, client.get("/")):
+            csp = resp.headers["content-security-policy"]
+            nonce = re.search(r"script-src 'self' 'nonce-([^']+)'", csp).group(1)
+            assert "frame-ancestors 'none'" in csp and "object-src 'none'" in csp
+            assert "unsafe-inline" not in csp.split("script-src")[1].split(";")[0]
+            # Every inline script carries this response's nonce; none has an inline handler.
+            inline = re.findall(r"<script(?![^>]*\bsrc=)([^>]*)>", resp.text)
+            assert inline and all(f'nonce="{nonce}"' in attrs for attrs in inline)
+            assert not re.search(r"<[^>]+\son[a-z]+=\"", resp.text)
+            assert resp.headers["x-content-type-options"] == "nosniff"
+            assert resp.headers["x-frame-options"] == "DENY"
+            assert resp.headers["referrer-policy"] == "same-origin"
+            assert resp.headers["cache-control"] == "no-store"
+        assert client.get("/login").headers["content-security-policy"] != login.headers["content-security-policy"]
+
+    def test_hsts_only_over_https(self, tmp_path):
+        client, _ = self._make_client(tmp_path)
+        assert "strict-transport-security" not in client.get("/api/version").headers
+        from fastapi.testclient import TestClient
+        secure = TestClient(client.app, base_url="https://testserver")
+        assert "max-age=" in secure.get("/api/version").headers["strict-transport-security"]
+
+    def test_posts_from_another_origin_are_refused(self, tmp_path):
+        client, _ = self._make_client(tmp_path)
+        self._login(client)
+        body = {"max_rowid": 5}
+        url = "/api/chats/+15551234567/read"
+        assert client.post(url, json=body).status_code == 200                                   # no Origin: not a browser
+        assert client.post(url, json=body, headers={"Origin": "http://testserver"}).status_code == 200
+        # A sibling subdomain is "same site" to the cookie, so it must be stopped here.
+        assert client.post(url, json=body, headers={"Origin": "http://evil.testserver"}).status_code == 403
+        assert client.post(url, json=body, headers={"Origin": "null"}).status_code == 403
+        assert client.post(url, json=body, headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+        assert client.post(url, json=body, headers={"Sec-Fetch-Site": "cross-site", "Origin": "http://testserver"}).status_code == 403
+        # A browser may blank Origin on a same-origin form post; its Sec-Fetch-Site still vouches for it.
+        assert client.post(url, json=body, headers={"Sec-Fetch-Site": "same-origin", "Origin": "null"}).status_code == 200
+        assert client.post("/logout-all", headers={"Origin": "https://example.com"}, follow_redirects=False).status_code == 403
+        assert client.get("/api/session").status_code == 200       # still signed in
+
+    def test_configured_origins_are_allowed(self, tmp_path):
+        from web_server import create_app
+        db_path = _create_test_chatdb(str(tmp_path / "chat.db"))
+        config = Config(
+            imessage=IMessageConfig(db_path=db_path),
+            app=AppConfig(state_db=str(tmp_path / "state.db"), temp_dir=str(tmp_path / "tmp")),
+            web=WebConfig(password="", allowed_origins=["https://other.example"]),
+        )
+        with patch("app_core.IMessageReader"):
+            core = AppCore(config)
+        from fastapi.testclient import TestClient
+        client = TestClient(create_app(core))
+        url = "/api/chats/+15551234567/read"
+        assert client.post(url, json={"max_rowid": 1}, headers={"Origin": "https://other.example"}).status_code == 200
+        assert client.post(url, json={"max_rowid": 1}, headers={"Origin": "https://nope.example"}).status_code == 403
+
+    def test_websocket_from_another_origin_is_refused(self, tmp_path):
+        from starlette.websockets import WebSocketDisconnect
+        client, _ = self._make_client(tmp_path)
+        self._login(client)
+        with client.websocket_connect("/ws", headers={"Origin": "http://testserver"}) as ws:
+            ws.send_text(json.dumps({"type": "ping"}))
+            assert json.loads(ws.receive_text())["type"] == "pong"
+        with pytest.raises(WebSocketDisconnect) as e:
+            with client.websocket_connect("/ws", headers={"Origin": "http://evil.testserver"}) as ws:
+                ws.receive_text()
+        assert e.value.code == 1008
+
+    def test_attachments_that_could_run_as_pages_are_downloads(self, tmp_path):
+        from web_server import _attachment_registry
+        client, _ = self._make_client(tmp_path)
+        self._login(client)
+        files = {"evil.html": b"<script>alert(1)</script>", "drawing.svg": b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+                 "photo.png": b"\x89PNG\r\n", "clip.mp4": b"\x00\x00\x00\x18ftyp", "notes.pdf": b"%PDF-1.4"}
+        got = {}
+        for name, data in files.items():
+            (tmp_path / name).write_bytes(data)
+            _attachment_registry["tok-" + name] = (str(tmp_path / name), time.time())
+            got[name] = client.get(f"/api/attachments/tok-{name}/{name}")
+            del _attachment_registry["tok-" + name]
+        for name in ("evil.html", "drawing.svg"):
+            h = got[name].headers
+            assert h["content-disposition"].startswith("attachment"), name
+            assert h["content-security-policy"].startswith("sandbox"), name
+            assert h["x-content-type-options"] == "nosniff"
+        for name in ("photo.png", "clip.mp4", "notes.pdf"):
+            h = got[name].headers
+            assert "content-disposition" not in h and "content-security-policy" not in h, name
+            assert h["x-content-type-options"] == "nosniff"
+            assert h["cache-control"] == "private, max-age=3600"
+
+    def test_a_photo_is_converted_once_however_often_it_is_viewed(self, tmp_path):
+        from web_server import _attachment_registry
+        client, core = self._make_client(tmp_path)
+        self._login(client)
+        heic = tmp_path / "photo.heic"
+        heic.write_bytes(b"not really a photo")
+        calls = []
+
+        def fake_sips(cmd, **kwargs):
+            calls.append(cmd)
+            with open(cmd[cmd.index("--out") + 1], "wb") as f:
+                f.write(b"\xff\xd8jpeg")
+
+        with patch("subprocess.run", side_effect=fake_sips):
+            for token in ("first-view", "second-view", "third-view"):   # each page load mints a new link
+                _attachment_registry[token] = (str(heic), time.time())
+                resp = client.get(f"/api/attachments/{token}/photo.heic")
+                assert resp.status_code == 200 and resp.headers["content-type"] == "image/jpeg"
+                del _attachment_registry[token]
+        assert len(calls) == 1
+        made = os.listdir(core.config.app.temp_dir)
+        assert len(made) == 1 and made[0].startswith("heic-") and made[0].endswith(".jpg")
+
+    def test_stale_temp_files_are_removed_and_fresh_ones_kept(self, tmp_path):
+        from web_server import _prune_dir
+        old, new, sub = tmp_path / "old.jpg", tmp_path / "new.jpg", tmp_path / "keep-dir"
+        old.write_bytes(b"x"); new.write_bytes(b"x"); sub.mkdir()
+        week_ago = time.time() - 7 * 86400
+        os.utime(old, (week_ago, week_ago)); os.utime(sub, (week_ago, week_ago))
+        assert _prune_dir(str(tmp_path), 3 * 86400) == 1
+        assert not old.exists() and new.exists() and sub.exists()
+        assert _prune_dir(str(tmp_path / "missing"), 60) == 0
+
+    def test_wrong_passwords_from_many_addresses_pause_password_login(self, tmp_path):
+        import web_server
+        client, _ = self._make_client(tmp_path)
+        cap = WebConfig().login_rate_limit * 6
+        for i in range(cap):
+            web_server._login_attempts.clear()      # as if every guess came from a new address
+            assert client.post("/login", data={"password": f"guess{i}"}).status_code == 401
+        web_server._login_attempts.clear()
+        resp = client.post("/login", data={"password": "testpass"}, follow_redirects=False)
+        assert resp.status_code == 429 and "paused" in resp.text
+        assert client.cookies.get("session") is None
+
+    def test_upload_extension_cannot_carry_anything_odd(self, tmp_path):
+        client, core = self._make_client(tmp_path)
+        self._login(client)
+        resp = client.post("/api/upload", files={"file": ("x.p n\"g;rm", b"data", "image/png")})
+        assert resp.status_code == 200
+        assert os.path.basename(resp.json()["file_path"]).endswith(".png")
+        resp = client.post("/api/upload", files={"file": ("pic.JPEG", b"data", "image/jpeg")})
+        assert resp.json()["file_path"].endswith(".jpeg")
+
+
+def test_identifiers_must_match_to_the_last_character():
+    from imessage_sender import _validate_identifier
+    assert _validate_identifier("+15551234567", 45)
+    assert not _validate_identifier("+15551234567\n", 45)
+    assert not _validate_identifier("chat0123abcd\n", 43)
